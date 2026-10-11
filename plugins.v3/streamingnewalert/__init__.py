@@ -1272,7 +1272,7 @@ _KDOCS_NOISE_RE = re.compile(
     r"^https?://|pan\.quark|pan\.xunlei|夸克|迅雷|^●|^【?\d{1,2}[:：]\d{2}】?$"
     r"|合集|微博|抖音|QQ|赞赏|防走丢|红包|会员|外卖|进群|搜索方法|注意[:：]|转存"
     r"|^\.\S*更新的?$|拼音更新|\d+\s*(部|个)$|更新的$|未命名|正在协作|个字$"
-    r"|^[-—=—-]+$|^&nbsp;$"
+    r"|^[-—=—-]+$|^&nbsp;$|^创建$|^更新$|^今天\s*\d{1,2}[:：]\d{2}$|^\d{1,2}[:：]\d{2}$"
 )
 
 
@@ -1524,7 +1524,7 @@ class StreamingNewAlert(_PluginBase):
     plugin_name = "影视平台上新提醒"
     plugin_desc = "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，并接入金山文档云盘资源每日更新表，按平台分组推送提醒，永久去重不重复打扰。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "hmily"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "streamingnew_"

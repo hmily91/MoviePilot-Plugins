@@ -24,7 +24,7 @@ NOISE_RE = re.compile(
     r"^https?://|pan\.quark|pan\.xunlei|夸克|迅雷|^●|^【?\d{1,2}[:：]\d{2}】?$"
     r"|合集|微博|抖音|QQ|赞赏|防走丢|红包|会员|外卖|进群|搜索方法|注意[:：]|转存"
     r"|^\.\S*更新的?$|拼音更新|\d+\s*(部|个)$|更新的$|未命名|正在协作|个字$"
-    r"|^[-—=—-]+$|^&nbsp;$"
+    r"|^[-—=—-]+$|^&nbsp;$|^创建$|^更新$|^今天\s*\d{1,2}[:：]\d{2}$|^\d{1,2}[:：]\d{2}$"
 )
 EPISODE_RE = re.compile(
     r"第\s*\d+\s*集|更新至\s*\d+|更新到\s*\d+|至\s*\d+\s*集|更新\s*\d+\s*集|更新\s*\d+|EP\s*\d+",
@@ -117,9 +117,32 @@ def extract_section(page, date: str) -> list:
         if tab.count():
             tab.click(timeout=15_000)
             page.wait_for_timeout(1_200)
-    page.wait_for_selector(".catalog-item", timeout=20_000)
-    cat = page.locator(".catalog-item", has_text=date).first
-    cat.click(timeout=20_000)
+    # 用 JS 原生点击做目录跳转（Playwright click 在部分 headless 环境会因
+    # actionability 判定超时，JS click 无此限制）
+    ret = page.evaluate(
+        """(date) => {
+             let it = [...document.querySelectorAll('.catalog-item')]
+                       .find(e => e.textContent.trim().startsWith(date));
+             if (!it) {
+               const tab = document.querySelector('.catalog-tab-item');
+               if (tab) { tab.click(); return 'OPENED_TAB'; }
+               return 'NO_ITEM';
+             }
+             it.click();
+             return 'OK';
+           }""",
+        date,
+    )
+    if ret == "OPENED_TAB":
+        page.wait_for_timeout(1_500)
+        page.evaluate(
+            """(date) => {
+                 const it = [...document.querySelectorAll('.catalog-item')]
+                             .find(e => e.textContent.trim().startsWith(date));
+                 if (it) it.click();
+               }""",
+            date,
+        )
     page.wait_for_timeout(2500)
 
     # 关闭可能弹出的协作提示
