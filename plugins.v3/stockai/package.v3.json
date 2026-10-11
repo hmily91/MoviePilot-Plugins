@@ -2,12 +2,13 @@
   "name": "股票AI分析助手",
   "description": "获取沪深A股行情与近5日K线，复用系统智能助手或自定义LLM接口进行技术面/走势/风险提示分析，定时推送早盘预判与收盘报告。",
   "labels": "股票,AI分析,定时推送,A股",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "icon": "stockai.png",
   "author": "hmily91",
   "level": 1,
   "system_version": ">=3.0.0",
   "history": {
+    "v1.1.1": "修复插件加载失败（插件 id 必须与主类名完全一致，区分大小写）；__init__.py 导入方式加固。",
     "v1.1.0": "新增「历史分析」前端页面与 4 个插件 API（/history、/run、/clear、/set_filter），历史持久化改用系统原生 save_data/get_data。",
     "v1.0.0": "首次发布：A股行情获取、LLM 智能分析、早盘/收盘定时任务、消息推送、历史持久化。"
   },
