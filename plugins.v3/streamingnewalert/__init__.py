@@ -450,6 +450,11 @@ def http_request(
                     continue
             return raw.decode("utf-8", errors="ignore")
         except Exception as err:
+            # 代理配置异常时自动降级为直连，避免所有外部请求整体失败
+            if proxies and _is_proxy_error(err):
+                logger.warn(f"[影视上新] 系统代理不可用，本次及后续请求改为直连：{err}")
+                proxies = None
+                continue
             if attempt >= retries:
                 logger.warn(f"[影视上新] 请求失败（已重试 {retries} 次）：{url} -> {err}")
                 return None
@@ -458,14 +463,66 @@ def http_request(
     return None
 
 
+def _is_proxy_error(err: Exception) -> bool:
+    """判断异常是否由代理配置引起（代理地址非法 / 代理不可达 / 代理握手失败）。"""
+    text = str(err).lower()
+    keywords = (
+        "failed to parse",
+        "invalid character",
+        "invalid proxy",
+        "proxyerror",
+        "proxy error",
+        "cannot connect to proxy",
+        "tunnel connection failed",
+        "proxy",
+    )
+    return any(key in text for key in keywords)
+
+
 def _build_proxies() -> Optional[Dict[str, str]]:
-    """读取 MoviePilot 系统代理配置（用户未配置时返回 None）。"""
+    """
+    读取 MoviePilot 系统代理配置，归一化为 requests 可直接使用的字典。
+
+    settings.PROXY 在不同版本下形态不同，必须分别处理：
+      - dict：{"http": "...", "https": "..."}（MoviePilot V3 常见形态，可直接使用）
+      - str ："http://host:port"（需自行展开为 http/https 两个键）
+      - 空值/空字典/空字符串：未配置，返回 None
+    注意：绝不能对 dict 直接 str()，否则会把 "{'http': 'http://...'}" 当成主机名解析而全部请求失败。
+    """
     if not settings:
         return None
     proxy = getattr(settings, "PROXY", None)
     if not proxy:
         return None
-    return {"http": str(proxy), "https": str(proxy)}
+
+    # 形态一：已是代理字典（V3 常见）
+    if isinstance(proxy, dict):
+        result: Dict[str, str] = {}
+        for key in ("http", "https", "all"):
+            value = proxy.get(key)
+            if not value or not isinstance(value, str):
+                continue
+            value = value.strip()
+            if value and _is_valid_proxy_url(value):
+                result[key] = value
+        return result or None
+
+    # 形态二：单个代理地址字符串
+    value = str(proxy).strip()
+    if not value or not _is_valid_proxy_url(value):
+        return None
+    return {"http": value, "https": value}
+
+
+def _is_valid_proxy_url(value: str) -> bool:
+    """校验代理地址是否形如 scheme://host[:port]，排除含空格或字典字符串等非法值。"""
+    if not value or any(ch.isspace() for ch in value):
+        return False
+    lowered = value.lower()
+    if not lowered.startswith(("http://", "https://", "socks4://", "socks5://", "socks5h://")):
+        return False
+    host_part = value.split("://", 1)[1]
+    return bool(host_part.split("/", 1)[0])
 
 
 def strip_jsonp(text: str) -> str:
@@ -1315,7 +1372,7 @@ class StreamingNewAlert(_PluginBase):
     plugin_name = "影视平台上新提醒"
     plugin_desc = "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，按平台分组推送提醒，永久去重不重复打扰。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_author = "MoviePilot Plugin"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "streamingnew_"
