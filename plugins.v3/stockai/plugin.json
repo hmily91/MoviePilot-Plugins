@@ -2,7 +2,7 @@
   "id": "StockAi",
   "name": "股票AI分析助手",
   "description": "获取沪深A股实时行情与近5日K线，复用系统「智能助手」或自定义LLM接口进行技术面/短期走势/风险提示分析，并定时推送早盘预判与收盘报告。",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "icon": "stockai.png",
   "author": "hmily",
   "author_url": "https://github.com/hmily91/MoviePilot-Plugins",
@@ -14,6 +14,7 @@
   "listen_events": [],
   "homepage": "https://github.com/hmily91/MoviePilot-Plugins",
   "history": {
+    "v1.1.3": "修复历史页按钮/标题文字不显示：组件显示文字改为顶层 text 键（插槽渲染），分析结论文本改为按行渲染；元数据作者统一为 hmily。",
     "v1.1.2": "修复配置页表单字段重叠（所有字段统一包进 VRow/VCol 栅格）；作者名调整为 hmily。",
     "v1.1.1": "修复插件加载失败：插件 id 必须与主类名完全一致（区分大小写），id 由 stockai 改回 StockAi；__init__.py 导入方式加固。",
     "v1.1.0": "新增「历史分析」前端页面（统计卡+筛选+立即分析/清空）与 4 个插件 API；历史持久化改用系统原生 save_data/get_data。",
