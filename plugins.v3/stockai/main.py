@@ -4,7 +4,8 @@
 =============================================
 
 功能概述：
-    1. 行情获取：通过东方财富公开行情接口获取沪深A股实时行情与近 5 日 K 线（无需密钥）。
+    1. 行情获取：通过东方财富公开行情接口获取沪深A股实时行情（无需密钥）；
+       日 K 线使用新浪/腾讯公开接口（东方财富 K 线接口已失效，稳定返回 404）。
     2. LLM 分析：默认复用 MoviePilot 系统「智能助手」已配置的 LLM 接口
        （LLM_API_KEY / LLM_BASE_URL / LLM_MODEL），也可在配置页自定义 OpenAI 兼容接口；
        对个股做技术面 / 短期走势 / 风险提示的 AI 分析。
@@ -57,9 +58,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "custom_model": "",               # 自定义模型名称
 }
 
-# 东方财富公开行情接口（无需密钥）
+# 东方财富公开行情接口（无需密钥，实时行情仍可用）
 QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
-KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline"
+# 日 K 线数据源：东方财富 K 线接口已失效（稳定 404），改用新浪为主、腾讯兜底
+SINA_KLINE_URL = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
+TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 
 # 单只股票请求间隔（秒），避免触发接口限流
 REQUEST_INTERVAL = 1.0
@@ -101,7 +104,7 @@ class StockAi(_PluginBase):
     plugin_name = "股票AI分析助手"
     plugin_desc = "获取沪深A股行情，调用LLM进行技术面/走势/风险提示分析，并定时推送早盘预判与收盘报告；支持历史分析前端页面。"
     plugin_icon = "StockAi.png"
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_author = "hmily"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "stockai_"      # 配置命名空间前缀
@@ -714,22 +717,78 @@ class StockAi(_PluginBase):
             logger.error("获取股票 %s 行情失败：%s", code, traceback.format_exc())
             return None
 
-    def _fetch_kline(self, market: str, code: str) -> List[str]:
+    def _fetch_kline(self, market: str, code: str) -> List[Dict[str, Any]]:
         """
-        获取近 5 日日K线（klt=101 日线，lmt=5 最近5条）。
-        返回字符串列表，每条格式：
-            日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
+        获取近 5 个交易日日K线（前复权）。
+        东方财富 K 线接口已失效（稳定返回 404），故改用：
+            1) 新浪财经公开接口（主）；
+            2) 腾讯财经 fqkline 接口（兜底）。
+        统一返回字段字典列表：date, open, close, high, low, volume。
+        任意单只股票失败都返回空列表，由上层跳过。
         """
-        secid = f"{market}.{code}"
-        url = (f"{KLINE_URL}?secid={secid}&klt=101&fqt=0&lmt=5&end=20500101"
-               "&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58")
+        # 市场前缀：沪市=sh，深市=sz
+        prefix = "sh" if market == "1" else "sz"
+        symbol = f"{prefix}{code}"
+
+        # —— 1) 新浪（主）——
         try:
-            resp = requests.get(url, headers=self._random_headers(), timeout=10)
+            sina_headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+                "Referer": "https://finance.sina.com.cn/",
+                "Accept": "application/json, text/plain, */*",
+            }
+            resp = requests.get(
+                SINA_KLINE_URL,
+                params={"symbol": symbol, "scale": 240, "ma": "no", "datalen": 5},
+                headers=sina_headers, timeout=10,
+            )
             resp.raise_for_status()
-            klines = ((resp.json() or {}).get("data") or {}).get("klines") or []
-            return list(klines)
+            payload = resp.json()
+            if isinstance(payload, list) and payload:
+                return [
+                    {
+                        "date": it.get("day"),
+                        "open": it.get("open"),
+                        "close": it.get("close"),
+                        "high": it.get("high"),
+                        "low": it.get("low"),
+                        "volume": it.get("volume"),
+                    }
+                    for it in payload
+                ]
         except Exception:  # noqa: BLE001
-            logger.error("获取股票 %s K线失败：%s", code, traceback.format_exc())
+            logger.warning("新浪K线获取失败，尝试腾讯兜底，代码=%s：%s", code, traceback.format_exc())
+
+        # —— 2) 腾讯（兜底）——
+        try:
+            tencent_headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+                "Referer": "https://gu.qq.com/",
+                "Accept": "application/json, text/plain, */*",
+            }
+            resp = requests.get(
+                TENCENT_KLINE_URL,
+                params={"param": f"{symbol},day,,,5,qfq"},
+                headers=tencent_headers, timeout=10,
+            )
+            resp.raise_for_status()
+            payload = resp.json() or {}
+            rows = (((payload.get("data") or {}).get(symbol) or {}).get("qfqday")) or []
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                # 腾讯格式：[日期, 开, 收, 高, 低, 成交量(手)]
+                if len(r) >= 6:
+                    out.append({
+                        "date": r[0],
+                        "open": r[1],
+                        "close": r[2],
+                        "high": r[3],
+                        "low": r[4],
+                        "volume": r[5],
+                    })
+            return out
+        except Exception:  # noqa: BLE001
+            logger.error("获取股票 %s K线失败（新浪/腾讯均失败）：%s", code, traceback.format_exc())
             return []
 
     # ===================================================================== #
@@ -987,15 +1046,15 @@ class StockAi(_PluginBase):
 
     def _build_prompt(self, quote: Dict[str, Any], klines: List[str], mode: str) -> str:
         """构造发送给 LLM 的结构化分析 Prompt。"""
-        # 整理近 5 日 K 线文本
+        # 整理近 5 日 K 线文本（结构化字典，避免依赖逗号分隔的顺序）
         kline_lines: List[str] = []
         for k in klines:
-            p = k.split(",")
-            # p: 日期,开,收,高,低,量,额,振幅,涨跌幅,涨跌额,换手率
-            if len(p) >= 9:
-                kline_lines.append(
-                    f"{p[0]} 开:{p[1]} 收:{p[2]} 高:{p[3]} 低:{p[4]} 涨跌幅:{p[8]}%"
-                )
+            if not k.get("date"):
+                continue
+            kline_lines.append(
+                f"{k.get('date')} 开:{k.get('open')} 收:{k.get('close')} "
+                f"高:{k.get('high')} 低:{k.get('low')}"
+            )
         kline_text = "\n".join(kline_lines) if kline_lines else "（无K线数据）"
 
         # 行情文本
