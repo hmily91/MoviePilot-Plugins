@@ -101,7 +101,7 @@ class StockAi(_PluginBase):
     plugin_name = "股票AI分析助手"
     plugin_desc = "获取沪深A股行情，调用LLM进行技术面/走势/风险提示分析，并定时推送早盘预判与收盘报告；支持历史分析前端页面。"
     plugin_icon = "StockAi.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "MoviePilot-StockAi"
     author_url = "https://github.com/your-name/moviepilot-plugin-stock-ai"
     plugin_config_prefix = "stockai_"      # 配置命名空间前缀
@@ -163,7 +163,8 @@ class StockAi(_PluginBase):
             {
                 "component": "VForm",
                 "content": [
-                    # 第一行：启用开关 + 立即执行
+                    # 第一行：启用开关 + 立即执行（每个字段都必须包裹在 VRow/VCol 中，
+                    # 否则 V3 前端渲染时会与相邻字段重叠错位）
                     {
                         "component": "VRow",
                         "content": [
@@ -175,15 +176,23 @@ class StockAi(_PluginBase):
                             ]},
                         ],
                     },
-                    # 自选股
-                    {"component": "VTextarea", "props": {
-                        "model": "stocks",
-                        "label": "自选股票代码",
-                        "placeholder": "600519,000001,300750",
-                        "rows": 3,
-                        "hint": "沪深A股代码，多只用英文逗号分隔",
-                    }},
-                    # 执行时间
+                    # 第二行：自选股（独占整行）
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VTextarea", "props": {
+                                    "model": "stocks",
+                                    "label": "自选股票代码",
+                                    "placeholder": "600519,000001,300750",
+                                    "rows": 3,
+                                    "hint": "沪深A股代码，多只用英文逗号分隔",
+                                    "persistent-hint": True,
+                                }},
+                            ]},
+                        ],
+                    },
+                    # 第三行：两个执行时间（各占半行）
                     {
                         "component": "VRow",
                         "content": [
@@ -195,7 +204,7 @@ class StockAi(_PluginBase):
                             ]},
                         ],
                     },
-                    # 推送与跳过开关
+                    # 第四行：三个推送/跳过开关（各占三分之一行）
                     {
                         "component": "VRow",
                         "content": [
@@ -210,20 +219,34 @@ class StockAi(_PluginBase):
                             ]},
                         ],
                     },
-                    # 通知标题
-                    {"component": "VTextField", "props": {
-                        "model": "notify_title", "label": "通知标题", "placeholder": "📈 股票AI分析报告",
-                    }},
-                    # LLM 配置来源
-                    {"component": "VSelect", "props": {
-                        "model": "llm_source",
-                        "label": "LLM配置来源",
-                        "items": [
-                            {"title": "跟随系统智能助手", "value": "system"},
-                            {"title": "自定义配置", "value": "custom"},
+                    # 第五行：通知标题（独占整行）
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VTextField", "props": {
+                                    "model": "notify_title", "label": "通知标题", "placeholder": "📈 股票AI分析报告",
+                                }},
+                            ]},
                         ],
-                    }},
-                    # 自定义 LLM 配置
+                    },
+                    # 第六行：LLM 配置来源（独占整行）
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VSelect", "props": {
+                                    "model": "llm_source",
+                                    "label": "LLM配置来源",
+                                    "items": [
+                                        {"title": "跟随系统智能助手", "value": "system"},
+                                        {"title": "自定义配置", "value": "custom"},
+                                    ],
+                                }},
+                            ]},
+                        ],
+                    },
+                    # 第七行：自定义 LLM 的 Key 与接口地址（各占半行）
                     {
                         "component": "VRow",
                         "content": [
@@ -235,9 +258,17 @@ class StockAi(_PluginBase):
                             ]},
                         ],
                     },
-                    {"component": "VTextField", "props": {
-                        "model": "custom_model", "label": "自定义模型名称", "placeholder": "gpt-4o",
-                    }},
+                    # 第八行：自定义模型名称（独占整行）
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VTextField", "props": {
+                                    "model": "custom_model", "label": "自定义模型名称", "placeholder": "gpt-4o",
+                                }},
+                            ]},
+                        ],
+                    },
                 ],
             }
         ]
