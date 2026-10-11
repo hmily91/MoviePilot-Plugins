@@ -118,8 +118,9 @@ if _PluginBase is None:  # pragma: no cover - 仅在宿主结构完全变化时�
     except Exception:  # noqa: BLE001
         pass
 
-# 兼容别名
-PluginBase = _PluginBase
+# 兼容别名（必须以下划线开头，否则 loader 遍历模块命名空间时
+# 会先命中基类并 break，导致真正的插件类 StreamingNewAlert 被跳过）
+_PluginBaseAlias = _PluginBase
 
 # 1.3 系统配置（读取代理、TMDB Key 等）
 settings = _safe_import(lambda: __import__("app.sdk.config", fromlist=["settings"]).settings) \
@@ -256,7 +257,7 @@ USER_AGENTS: List[str] = [
 
 
 @dataclass
-class MediaItem:
+class _MediaItem:
     """一条候选上新内容。"""
 
     platform: str                      # 平台 key：iqiyi / youku / tencent
@@ -609,7 +610,7 @@ def find_list_by_key(data: Any, key: str, depth: int = 0) -> List[Any]:
 # ============================================================================
 
 
-class ContentFilter:
+class _ContentFilter:
     """负责判断一条候选内容是否属于「已正式上线的正片」。"""
 
     def __init__(
@@ -672,7 +673,7 @@ class ContentFilter:
             return False
         return online >= now - timedelta(days=self._days)
 
-    def check(self, item: MediaItem, raw: Dict[str, Any]) -> Tuple[bool, str]:
+    def check(self, item: _MediaItem, raw: Dict[str, Any]) -> Tuple[bool, str]:
         """
         综合校验。
 
@@ -710,7 +711,7 @@ class ContentFilter:
 # ============================================================================
 
 
-class TmdbSource:
+class _TmdbSource:
     """
     TMDB 数据源（推荐）。
 
@@ -814,7 +815,7 @@ class TmdbSource:
         mtype: str,
         days: int,
         api_key: str,
-    ) -> List[MediaItem]:
+    ) -> List[_MediaItem]:
         """
         查询「近 N 天内、在中国大陆该平台上线的」电影 / 剧集。
 
@@ -860,7 +861,7 @@ class TmdbSource:
             return []
 
         exclude = self.EXCLUDE_GENRES.get(kind, set())
-        items: List[MediaItem] = []
+        items: List[_MediaItem] = []
         for raw in data.get("results", []) or []:
             name = (raw.get("title") or raw.get("name")
                     or raw.get("original_title") or raw.get("original_name") or "")
@@ -871,7 +872,7 @@ class TmdbSource:
                 continue
             online_date = raw.get("release_date") or raw.get("first_air_date") or ""
             items.append(
-                MediaItem(
+                _MediaItem(
                     platform=platform_key,
                     platform_label=platform_label,
                     mtype=mtype,
@@ -885,20 +886,20 @@ class TmdbSource:
         return items
 
 
-_TMDB_SOURCE: Optional[TmdbSource] = None
+_TMDB_SOURCE: Optional[_TmdbSource] = None
 _TMDB_LOCK = threading.Lock()
 
 
-def get_tmdb_source() -> TmdbSource:
+def get_tmdb_source() -> _TmdbSource:
     """获取 TMDB 数据源单例（provider_id 缓存需要跨任务复用）。"""
     global _TMDB_SOURCE
     with _TMDB_LOCK:
         if _TMDB_SOURCE is None:
-            _TMDB_SOURCE = TmdbSource()
+            _TMDB_SOURCE = _TmdbSource()
         return _TMDB_SOURCE
 
 
-class PlatformFetcher:
+class _PlatformFetcher:
     """
     平台抓取器基类。
 
@@ -919,7 +920,7 @@ class PlatformFetcher:
         api_token: str = "",
         tmdb_key: str = "",
         days: int = 7,
-    ) -> List[MediaItem]:
+    ) -> List[_MediaItem]:
         """
         抓取指定内容类型的新上线内容。
 
@@ -934,7 +935,7 @@ class PlatformFetcher:
         :param tmdb_key: TMDB API Key，为空表示不使用 TMDB
         :param days: 只取近 N 天内上线的内容
         """
-        items: List[MediaItem] = []
+        items: List[_MediaItem] = []
 
         # 6.0 优先使用 TMDB：按「观看平台 + 地区 + 上线日期区间」精确查询
         if tmdb_key:
@@ -991,7 +992,7 @@ class PlatformFetcher:
 
     # ---------------------------------------------------------------- 内部方法
 
-    def _fetch_from_custom_api(self, mtype: str, api_base: str, api_token: str) -> List[MediaItem]:
+    def _fetch_from_custom_api(self, mtype: str, api_base: str, api_token: str) -> List[_MediaItem]:
         """调用用户自定义的影视聚合 API（需返回 JSON，字段由通用解析器适配）。"""
         url = str(api_base).replace("{platform}", self.platform_key).replace("{type}", mtype)
         headers = build_headers()
@@ -1042,8 +1043,8 @@ class PlatformFetcher:
             unique.append(raw)
         return unique
 
-    def _to_media_item(self, raw: Dict[str, Any], default_mtype: str) -> Optional[MediaItem]:
-        """把一条原始数据转换为 MediaItem（无法识别标题时返回 None）。"""
+    def _to_media_item(self, raw: Dict[str, Any], default_mtype: str) -> Optional[_MediaItem]:
+        """把一条原始数据转换为 _MediaItem（无法识别标题时返回 None）。"""
         name = str(raw.get("title") or raw.get("name") or "").strip()
         if not name:
             return None
@@ -1055,7 +1056,7 @@ class PlatformFetcher:
         if not year:
             year = extract_year(name, online_dt.year if online_dt else "")
 
-        return MediaItem(
+        return _MediaItem(
             platform=self.platform_key,
             platform_label=self.platform_label,
             mtype=mtype,
@@ -1067,7 +1068,7 @@ class PlatformFetcher:
         )
 
 
-class IQiyiFetcher(PlatformFetcher):
+class _IQiyiFetcher(_PlatformFetcher):
     """爱奇艺数据源。"""
 
     platform_key = "iqiyi"
@@ -1101,7 +1102,7 @@ class IQiyiFetcher(PlatformFetcher):
     }
 
 
-class YoukuFetcher(PlatformFetcher):
+class _YoukuFetcher(_PlatformFetcher):
     """优酷数据源。"""
 
     platform_key = "youku"
@@ -1139,7 +1140,7 @@ class YoukuFetcher(PlatformFetcher):
     }
 
 
-class TencentFetcher(PlatformFetcher):
+class _TencentFetcher(_PlatformFetcher):
     """腾讯视频数据源。"""
 
     platform_key = "tencent"
@@ -1189,10 +1190,10 @@ class TencentFetcher(PlatformFetcher):
         return selected or data
 
 
-FETCHERS: Dict[str, PlatformFetcher] = {
-    "iqiyi": IQiyiFetcher(),
-    "youku": YoukuFetcher(),
-    "tencent": TencentFetcher(),
+FETCHERS: Dict[str, _PlatformFetcher] = {
+    "iqiyi": _IQiyiFetcher(),
+    "youku": _YoukuFetcher(),
+    "tencent": _TencentFetcher(),
 }
 
 
@@ -1201,7 +1202,7 @@ FETCHERS: Dict[str, PlatformFetcher] = {
 # ============================================================================
 
 
-class PushHistory:
+class _PushHistory:
     """
     已推送记录持久化存储。
 
@@ -1255,7 +1256,7 @@ class PushHistory:
         with self._lock:
             return key in self._data.get("items", {})
 
-    def add(self, item: MediaItem) -> None:
+    def add(self, item: _MediaItem) -> None:
         """记录一条已推送内容。"""
         with self._lock:
             self._data.setdefault("items", {})[item.dedup_key] = {
@@ -1314,7 +1315,7 @@ class StreamingNewAlert(_PluginBase):
     plugin_name = "影视平台上新提醒"
     plugin_desc = "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，按平台分组推送提醒，永久去重不重复打扰。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_author = "MoviePilot Plugin"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "streamingnew_"
@@ -1336,7 +1337,7 @@ class StreamingNewAlert(_PluginBase):
         self._tmdb_key = ""
         self._strict_dates = False
         self._onlyonce = False
-        self._history: Optional[PushHistory] = None
+        self._history: Optional[_PushHistory] = None
         self._timer: Optional[threading.Timer] = None
         self._last_run: str = ""
         self._last_result: str = ""
@@ -1359,7 +1360,7 @@ class StreamingNewAlert(_PluginBase):
             self._api_token = str(config.get("api_token") or "").strip()
             # TMDB：默认开启，Key 留空则自动复用 MoviePilot 系统设置里的 TMDB API Key
             self._use_tmdb = bool(config.get("use_tmdb", True))
-            self._tmdb_key = TmdbSource.resolve_api_key(config.get("tmdb_api_key") or "")
+            self._tmdb_key = _TmdbSource.resolve_api_key(config.get("tmdb_api_key") or "")
             # strict / loose：拿不到上线日期时是否仍然推送
             self._strict_dates = str(config.get("date_mode") or "loose").lower() == "strict"
             self._onlyonce = bool(config.get("onlyonce"))
@@ -1367,7 +1368,7 @@ class StreamingNewAlert(_PluginBase):
 
             # 去重库：放在插件数据目录，重启不丢失
             if self._history is None:
-                self._history = PushHistory(self.get_data_path())
+                self._history = _PushHistory(self.get_data_path())
 
             if not self._enabled:
                 logger.info("[影视上新] 插件未启用，跳过初始化后续步骤")
@@ -1808,7 +1809,7 @@ class StreamingNewAlert(_PluginBase):
             return {"pushed": 0, "skipped": "插件未启用"}
 
         if self._history is None:
-            self._history = PushHistory(self.get_data_path())
+            self._history = _PushHistory(self.get_data_path())
 
         started = datetime.now()
         logger.info("[影视上新] ===== 开始检查三大平台上新 =====")
@@ -1821,14 +1822,14 @@ class StreamingNewAlert(_PluginBase):
             "duplicated": 0,
         }
 
-        content_filter = ContentFilter(
+        content_filter = _ContentFilter(
             days=self._days,
             enable_movie=self._types.get("movie", True),
             enable_tv=self._types.get("tv", True),
             strict_dates=self._strict_dates,
         )
 
-        new_items: List[MediaItem] = []
+        new_items: List[_MediaItem] = []
         platform_index = 0
 
         for platform_key, platform_label in PLATFORMS.items():
@@ -1845,7 +1846,7 @@ class StreamingNewAlert(_PluginBase):
                 continue
 
             try:
-                platform_candidates: List[MediaItem] = []
+                platform_candidates: List[_MediaItem] = []
                 for mtype in ("movie", "tv"):
                     if not self._types.get(mtype):
                         continue
@@ -1864,7 +1865,7 @@ class StreamingNewAlert(_PluginBase):
                 summary["platforms"][platform_label] = {"候选": len(platform_candidates)}
                 summary["candidates"] += len(platform_candidates)
 
-                kept: List[MediaItem] = []
+                kept: List[_MediaItem] = []
                 for item in platform_candidates:
                     ok, reason = content_filter.check(item, item.extra)
                     if not ok:
@@ -1915,10 +1916,10 @@ class StreamingNewAlert(_PluginBase):
         logger.info(f"[影视上新] ===== 检查结束：{self._last_result} =====")
         return summary
 
-    def _push(self, items: List[MediaItem]) -> None:
+    def _push(self, items: List[_MediaItem]) -> None:
         """按平台分组构造通知内容，并通过系统全局消息通道发送。"""
         try:
-            grouped: Dict[str, List[MediaItem]] = {}
+            grouped: Dict[str, List[_MediaItem]] = {}
             for item in items:
                 grouped.setdefault(item.platform_label, []).append(item)
 
