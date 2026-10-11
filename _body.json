@@ -1,0 +1,1 @@
+{"tag_name": "StreamingNewAlert_v1.2.1", "name": "StreamingNewAlert v1.2.1", "body": "## v1.2.1\n\n- CI 提取加固：headless 环境改用 JS 原生点击目录跳转（修复 Playwright actionability 超时）\n- 新增整页滚动回退提取方案\n- 补充协作残留行噪声过滤", "draft": false, "prerelease": false}
