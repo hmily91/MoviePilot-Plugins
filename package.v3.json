@@ -4,6 +4,7 @@
     "description": "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新（支持 TMDB 精确数据源），按平台分组推送提醒，按「平台+类型+名称+年份」永久去重。",
     "labels": "影视,通知",
     "version": "1.1.2",
+    "release": true,
     "icon": "Moviepilot_A.png",
     "author": "MoviePilot Plugin",
     "level": 1,
