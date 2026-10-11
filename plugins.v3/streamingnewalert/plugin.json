@@ -1,0 +1,142 @@
+{
+  "id": "StreamingNewAlert",
+  "name": "影视平台上新提醒",
+  "description": "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，按平台分组推送提醒，按「平台+类型+名称+年份」永久去重。",
+  "version": "1.1.1",
+  "icon": "Moviepilot_A.png",
+  "author": "MoviePilot Plugin",
+  "author_url": "https://github.com/jxxghp/MoviePilot-Plugins",
+  "level": 1,
+  "labels": "影视,通知",
+  "system_version": ">=3.0.0",
+  "v3": true,
+  "has_page": true,
+  "listen_events": [],
+  "history": {
+    "v1.1.0": "新增 TMDB 数据源：按「地区 CN + 观看平台 + 上线日期区间」精确查询，补全平台接口缺失的上线日期。",
+    "v1.0.0": "首次发布：三平台上新监控、正片过滤、永久去重、定时与手动执行、全局消息推送。",
+    "v1.1.1": "修复加载失败：插件物理目录名必须为插件ID小写（MoviePilot V3 加载器硬性要求），并加固宿主依赖导入，任何导入异常不再导致插件加载失败。"
+  },
+  "config": {
+    "enabled": false,
+    "onlyonce": false,
+    "iqiyi": true,
+    "youku": true,
+    "tencent": true,
+    "movie": true,
+    "tv": true,
+    "cron": "10:00",
+    "days": 7,
+    "notify_title": "🎬 影视平台上新提醒",
+    "api_base": "",
+    "api_token": "",
+    "use_tmdb": true,
+    "tmdb_api_key": "",
+    "date_mode": "loose"
+  },
+  "schema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "title": "启用插件",
+        "description": "关闭后不再执行定时检查与推送",
+        "default": false
+      },
+      "onlyonce": {
+        "type": "boolean",
+        "title": "立即执行一次",
+        "description": "保存配置后立即抓取并推送一次，执行后自动复位",
+        "default": false
+      },
+      "iqiyi": {
+        "type": "boolean",
+        "title": "监控爱奇艺",
+        "description": "是否抓取爱奇艺平台上新",
+        "default": true
+      },
+      "youku": {
+        "type": "boolean",
+        "title": "监控优酷",
+        "description": "是否抓取优酷平台上新",
+        "default": true
+      },
+      "tencent": {
+        "type": "boolean",
+        "title": "监控腾讯视频",
+        "description": "是否抓取腾讯视频上新",
+        "default": true
+      },
+      "movie": {
+        "type": "boolean",
+        "title": "推送电影",
+        "description": "是否推送电影类上新（只含正式上线正片）",
+        "default": true
+      },
+      "tv": {
+        "type": "boolean",
+        "title": "推送电视剧",
+        "description": "是否推送电视剧类上新（仅首次上线提醒一次）",
+        "default": true
+      },
+      "cron": {
+        "type": "string",
+        "title": "每日执行时间",
+        "description": "每日自动执行的时间，格式 HH:MM，多个时间用英文逗号分隔，如 10:00,22:00",
+        "pattern": "^([01]?\\d|2[0-3]):([0-5]?\\d)(,([01]?\\d|2[0-3]):([0-5]?\\d))*$",
+        "default": "10:00"
+      },
+      "days": {
+        "type": "integer",
+        "title": "上新时间范围",
+        "description": "只推送近多少天内上线的内容，单位天",
+        "minimum": 1,
+        "maximum": 365,
+        "default": 7
+      },
+      "notify_title": {
+        "type": "string",
+        "title": "通知标题",
+        "description": "自定义推送通知的标题",
+        "default": "🎬 影视平台上新提醒"
+      },
+      "api_base": {
+        "type": "string",
+        "title": "自定义聚合API（可选）",
+        "description": "第三方影视聚合API地址，支持 {platform} 与 {type} 占位符；留空则使用内置数据源",
+        "default": ""
+      },
+      "api_token": {
+        "type": "string",
+        "title": "API Token（可选）",
+        "description": "自定义聚合API的 Bearer Token",
+        "default": ""
+      },
+      "use_tmdb": {
+        "type": "boolean",
+        "title": "使用TMDB数据源",
+        "description": "按「地区CN + 观看平台 + 上线日期区间」精确查询，推荐开启（需要 TMDB API Key）",
+        "default": true
+      },
+      "tmdb_api_key": {
+        "type": "string",
+        "title": "TMDB API Key（可选）",
+        "description": "留空则自动复用 MoviePilot 系统设置中的 TMDB API Key",
+        "default": ""
+      },
+      "date_mode": {
+        "type": "string",
+        "title": "日期策略",
+        "description": "loose=平台未公开日期时按本次首见推送（默认）；strict=必须解析到近 N 天上线日期才推送",
+        "enum": [
+          "loose",
+          "strict"
+        ],
+        "default": "loose"
+      }
+    },
+    "required": [
+      "enabled"
+    ]
+  }
+}
