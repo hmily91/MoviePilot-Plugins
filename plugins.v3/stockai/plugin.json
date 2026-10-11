@@ -1,0 +1,122 @@
+{
+  "id": "stockai",
+  "name": "股票AI分析助手",
+  "description": "获取沪深A股实时行情与近5日K线，复用系统「智能助手」或自定义LLM接口进行技术面/短期走势/风险提示分析，并定时推送早盘预判与收盘报告。",
+  "version": "1.1.0",
+  "icon": "stockai.png",
+  "author": "hmily91",
+  "author_url": "https://github.com/hmily91/MoviePilot-Plugins",
+  "level": 1,
+  "labels": "股票,A股,AI分析,定时推送",
+  "system_version": ">=3.0.0",
+  "v3": true,
+  "has_page": true,
+  "listen_events": [],
+  "homepage": "https://github.com/hmily91/MoviePilot-Plugins",
+  "history": {
+    "v1.1.0": "新增「历史分析」前端页面（统计卡+筛选+立即分析/清空）与 4 个插件 API；历史持久化改用系统原生 save_data/get_data；插件 id 统一为 stockai。",
+    "v1.0.0": "首次发布：东方财富行情获取、LLM智能分析（复用系统智能助手或自定义）、早盘预判/收盘分析定时任务、全局消息推送、历史记录持久化。"
+  },
+  "config": {
+    "enabled": false,
+    "onlyonce": false,
+    "stocks": "",
+    "morning_time": "09:00",
+    "close_time": "15:30",
+    "push_morning": true,
+    "push_close": true,
+    "skip_holiday": true,
+    "notify_title": "📈 股票AI分析报告",
+    "llm_source": "system",
+    "custom_api_key": "",
+    "custom_base_url": "",
+    "custom_model": ""
+  },
+  "schema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "title": "启用插件",
+        "description": "开启后才会注册定时任务并执行分析。",
+        "default": false
+      },
+      "onlyonce": {
+        "type": "boolean",
+        "title": "立即执行分析",
+        "description": "保存配置后立即运行一次分析（运行后自动关闭），用于手动测试。",
+        "default": false
+      },
+      "stocks": {
+        "type": "string",
+        "title": "自选股票代码",
+        "description": "沪深A股代码，多只用英文逗号分隔，如：600519,000001,300750",
+        "default": ""
+      },
+      "morning_time": {
+        "type": "string",
+        "title": "早盘预判执行时间",
+        "description": "每日开市前分析时间，格式 HH:MM",
+        "pattern": "^([01]?\\d|2[0-3]):([0-5]?\\d)$",
+        "default": "09:00"
+      },
+      "close_time": {
+        "type": "string",
+        "title": "收盘分析执行时间",
+        "description": "每日闭市后分析时间，格式 HH:MM",
+        "pattern": "^([01]?\\d|2[0-3]):([0-5]?\\d)$",
+        "default": "15:30"
+      },
+      "push_morning": {
+        "type": "boolean",
+        "title": "推送早盘预判",
+        "description": "是否推送开市前分析报告",
+        "default": true
+      },
+      "push_close": {
+        "type": "boolean",
+        "title": "推送收盘分析",
+        "description": "是否推送闭市后分析报告",
+        "default": true
+      },
+      "skip_holiday": {
+        "type": "boolean",
+        "title": "休市日自动跳过",
+        "description": "开启后周末（及内置休市日）不执行分析",
+        "default": true
+      },
+      "notify_title": {
+        "type": "string",
+        "title": "通知标题",
+        "description": "自定义推送消息的标题",
+        "default": "📈 股票AI分析报告"
+      },
+      "llm_source": {
+        "type": "string",
+        "title": "LLM配置来源",
+        "description": "跟随系统智能助手 / 自定义配置",
+        "enum": ["system", "custom"],
+        "default": "system"
+      },
+      "custom_api_key": {
+        "type": "string",
+        "title": "自定义LLM API Key",
+        "description": "配置来源为“自定义”时生效",
+        "default": ""
+      },
+      "custom_base_url": {
+        "type": "string",
+        "title": "自定义LLM接口地址",
+        "description": "兼容 OpenAI 格式，如 https://api.openai.com/v1",
+        "default": ""
+      },
+      "custom_model": {
+        "type": "string",
+        "title": "自定义模型名称",
+        "description": "自定义调用的模型名称，如 gpt-4o",
+        "default": ""
+      }
+    },
+    "required": ["enabled"]
+  }
+}
