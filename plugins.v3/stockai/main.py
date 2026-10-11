@@ -101,9 +101,9 @@ class StockAi(_PluginBase):
     plugin_name = "股票AI分析助手"
     plugin_desc = "获取沪深A股行情，调用LLM进行技术面/走势/风险提示分析，并定时推送早盘预判与收盘报告；支持历史分析前端页面。"
     plugin_icon = "StockAi.png"
-    plugin_version = "1.1.2"
-    plugin_author = "MoviePilot-StockAi"
-    author_url = "https://github.com/your-name/moviepilot-plugin-stock-ai"
+    plugin_version = "1.1.3"
+    plugin_author = "hmily"
+    author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "stockai_"      # 配置命名空间前缀
     plugin_order = 50                       # 加载优先级
     auth_level = 1                          # 所需用户等级
@@ -313,50 +313,50 @@ class StockAi(_PluginBase):
             "content": [
                 {"component": "VCardText", "content": [
                     {"component": "VRow", "content": [
+                        # 注意：显示文字必须放在组件顶层 "text" 键（渲染为插槽内容），
+                        # 放进 props 会绑定成属性导致文字不显示。
                         {"component": "VCol", "props": {"cols": 12, "md": 7}, "content": [
-                            {"component": "div", "props": {
-                                "class": "text-h6",
-                                "text": f"📈 历史分析记录（共 {len(history)} 条，当前展示 {len(shown)} 条）",
-                            }},
+                            {"component": "div", "props": {"class": "text-h6"},
+                             "text": f"📈 历史分析记录（共 {len(history)} 条，当前展示 {len(shown)} 条）"},
                         ]},
                         {"component": "VCol", "props": {"cols": 12, "md": 5}, "content": [
                             {"component": "VBtn", "props": {
                                 "size": "small", "variant": "text", "class": "mr-1",
                                 "color": "primary" if mode_filter == "all" else "default",
-                                "text": "全部",
-                                "events": {"click": {"api": "plugin/StockAi/set_filter",
-                                                    "method": "get", "params": {"mode": "all"}}},
-                            }},
+                            },
+                             "text": "全部",
+                             "events": {"click": {"api": "plugin/StockAi/set_filter",
+                                                  "method": "get", "params": {"mode": "all"}}}},
                             {"component": "VBtn", "props": {
                                 "size": "small", "variant": "text", "class": "mr-1",
                                 "color": "primary" if mode_filter == "morning" else "default",
-                                "text": "早盘预判",
-                                "events": {"click": {"api": "plugin/StockAi/set_filter",
-                                                    "method": "get", "params": {"mode": "morning"}}},
-                            }},
+                            },
+                             "text": "早盘预判",
+                             "events": {"click": {"api": "plugin/StockAi/set_filter",
+                                                  "method": "get", "params": {"mode": "morning"}}}},
                             {"component": "VBtn", "props": {
                                 "size": "small", "variant": "text",
                                 "color": "primary" if mode_filter == "close" else "default",
-                                "text": "收盘分析",
-                                "events": {"click": {"api": "plugin/StockAi/set_filter",
-                                                    "method": "get", "params": {"mode": "close"}}},
-                            }},
+                            },
+                             "text": "收盘分析",
+                             "events": {"click": {"api": "plugin/StockAi/set_filter",
+                                                  "method": "get", "params": {"mode": "close"}}}},
                         ]},
                     ]},
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VBtn", "props": {
                                 "color": "primary", "variant": "flat", "prepend-icon": "mdi-play",
-                                "text": "立即分析",
-                                "events": {"click": {"api": "plugin/StockAi/run", "method": "post"}},
-                            }},
+                            },
+                             "text": "立即分析",
+                             "events": {"click": {"api": "plugin/StockAi/run", "method": "post"}}},
                         ]},
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VBtn", "props": {
                                 "color": "error", "variant": "outlined", "prepend-icon": "mdi-delete",
-                                "text": "清空历史",
-                                "events": {"click": {"api": "plugin/StockAi/clear", "method": "post"}},
-                            }},
+                            },
+                             "text": "清空历史",
+                             "events": {"click": {"api": "plugin/StockAi/clear", "method": "post"}}},
                         ]},
                     ]},
                 ]},
@@ -383,27 +383,24 @@ class StockAi(_PluginBase):
                 if i > 0:
                     stock_blocks.append({"component": "VDivider", "props": {"class": "my-2"}})
                 stock_blocks.append({
-                    "component": "div", "props": {
-                        "class": "text-subtitle-1 font-weight-bold mb-1",
-                        "text": f"{s.get('name')}（{s.get('code')}）",
-                    },
+                    "component": "div", "props": {"class": "text-subtitle-1 font-weight-bold mb-1"},
+                    "text": f"{s.get('name')}（{s.get('code')}）",
                 })
-                # 结论文本经 HTML 转义并以 <br> 还原换行，避免 XSS 与排版错乱
-                stock_blocks.append({
-                    "component": "div", "props": {
-                        "class": "text-body-2",
-                        "innerHTML": self._escape_html(s.get("analysis") or "（无分析结论）"),
-                    },
-                })
+                # 分析结论文本由 Vue 插槽渲染（自动转义），按行拆分还原换行排版
+                analysis_lines = str(s.get("analysis") or "（无分析结论）").split("\n")
+                for line in analysis_lines:
+                    if line.strip():
+                        stock_blocks.append({
+                            "component": "div", "props": {"class": "text-body-2"},
+                            "text": line,
+                        })
             cards.append({
                 "component": "VCard",
                 "props": {"variant": "outlined", "class": "mb-3"},
                 "content": [
                     {"component": "VCardText", "content": [
-                        {"component": "div", "props": {
-                            "class": "text-h6 mb-2",
-                            "text": f"🕒 {rec.get('time')} ｜ {self._mode_label(mode)} ｜ {len(stocks)} 只",
-                        }},
+                        {"component": "div", "props": {"class": "text-h6 mb-2"},
+                         "text": f"🕒 {rec.get('time')} ｜ {self._mode_label(mode)} ｜ {len(stocks)} 只"},
                     ] + stock_blocks},
                 ],
             })
@@ -1056,8 +1053,8 @@ class StockAi(_PluginBase):
     @staticmethod
     def _escape_html(text: Any) -> str:
         """
-        转义 HTML 特殊字符并把换行转为 <br>。
-        历史页在 div 上以 innerHTML 渲染 AI 结论，必须转义以防 XSS 与排版错乱。
+        转义 HTML 特殊字符并把换行转为 <br>（当前页面已改为按行拆分渲染，
+        保留此工具方法供其它展示场景使用）。
         """
         if text is None:
             return ""
