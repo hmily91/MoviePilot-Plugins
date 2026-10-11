@@ -1314,7 +1314,7 @@ class StreamingNewAlert(_PluginBase):
     plugin_name = "影视平台上新提醒"
     plugin_desc = "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，按平台分组推送提醒，永久去重不重复打扰。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "MoviePilot Plugin"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "streamingnew_"
@@ -2038,3 +2038,16 @@ class StreamingNewAlert(_PluginBase):
             if match:
                 result.append((int(match.group(1)), int(match.group(2))))
         return result or [(10, 0)]
+
+# ============================================================================
+# 加载自检：模块执行到这里说明完整落盘且可解析。若宿主日志中看不到本行，
+# 说明安装到运行目录的 __init__.py 不完整（下载被截断/污染），请改用
+# GitHub Release 渠道重新安装（Release 资产带 ZIP 校验，不会静默损坏）。
+# ============================================================================
+try:
+    logger.info(
+        "[影视上新] 插件模块加载完成 v%s：插件类 StreamingNewAlert 已定义，等待宿主实例化",
+        plugin_version,
+    )
+except Exception:  # noqa: BLE001  诊断日志绝不影响加载
+    pass
