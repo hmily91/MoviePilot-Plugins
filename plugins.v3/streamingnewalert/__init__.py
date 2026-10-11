@@ -210,10 +210,14 @@ STATUS_ONLINE_WORDS: List[str] = [
 # 注意：这里只匹配「集数」，不匹配「第二季 / 第二部」，因为续作季播属于新的正片内容。
 EPISODE_PATTERN = re.compile(
     r"(第\s*\d+\s*集"
-    r"|更新至\s*\d+\s*集|更新到\s*\d+\s*集|至\s*\d+\s*集|更新\s*\d+\s*集"
+    r"|更新至\s*\d+|更新到\s*\d+|至\s*\d+\s*集|更新\s*\d+\s*集"
+    r"|更新\s*\d+"
     r"|EP\s*\d+)",
     re.IGNORECASE,
 )
+
+# 云盘快照分节日期行（如 2026.10.11 周日更新的）
+DATE_LINE_RE = re.compile(r"^20\d{2}\.\d{2}\.\d{2}\s*周.更新的")
 
 # 常见标题字段（用于从 JSON 数据中递归提取条目）
 TITLE_KEYS: Tuple[str, ...] = (
@@ -1255,6 +1259,154 @@ FETCHERS: Dict[str, _PlatformFetcher] = {
 
 
 # ============================================================================
+# 六·五、云盘资源数据源（金山文档每日更新表 → GitHub Actions 生成 JSON → 本插件拉取）
+# ============================================================================
+
+# 默认拉取仓库内的快照（由仓库的 GitHub Actions 每天自动从金山文档生成）
+DEFAULT_KDOCS_DATA_URL = (
+    "https://raw.githubusercontent.com/hmily91/MoviePilot-Plugins/main/data/kdocs_new.json"
+)
+
+# 云盘快照里需要剔除的行：网盘链接、推广、时间点、导航说明等
+_KDOCS_NOISE_RE = re.compile(
+    r"^https?://|pan\.quark|pan\.xunlei|夸克|迅雷|^●|^【?\d{1,2}[:：]\d{2}】?$"
+    r"|合集|微博|抖音|QQ|赞赏|防走丢|红包|会员|外卖|进群|搜索方法|注意[:：]|转存"
+    r"|^\.\S*更新的?$|拼音更新|\d+\s*(部|个)$|更新的$|未命名|正在协作|个字$"
+    r"|^[-—=—-]+$|^&nbsp;$"
+)
+
+
+class _KdocsCloudSource:
+    """
+    云盘资源数据源。
+
+    金山文档分享页需要浏览器渲染，插件端无法直接抓取；
+    由插件仓库的 GitHub Actions 每天定时渲染文档并生成 JSON 快照，
+    本源只负责下载快照并解析为 _MediaItem。
+    """
+
+    platform_key = "clouddisk"
+    platform_label = "云盘资源"
+
+    @classmethod
+    def fetch(cls, days: int, data_url: str = "") -> List[_MediaItem]:
+        """下载快照 JSON 并解析出最近 N 天的条目。"""
+        url = (data_url or "").strip() or DEFAULT_KDOCS_DATA_URL
+        text = cls._download(url) or cls._download(DEFAULT_KDOCS_DATA_URL)
+        if not text:
+            logger.warn("[影视上新] 云盘资源快照拉取失败，本次跳过该数据源")
+            return []
+
+        try:
+            payload = json.loads(strip_jsonp(text))
+        except Exception as err:
+            logger.warn(f"[影视上新] 云盘资源快照解析失败：{err}")
+            return []
+        sections = payload.get("sections") or {}
+        if not sections:
+            logger.info("[影视上新] 云盘资源快照为空")
+            return []
+
+        now = datetime.now()
+        earliest = now.date() - timedelta(days=max(1, days) - 1)
+        items: List[_MediaItem] = []
+        for section_date, titles in sections.items():
+            online = parse_online_date(str(section_date))
+            if not online or online.date() < earliest:
+                continue  # 只保留最近 N 天的分节
+            online_str = online.strftime("%Y-%m-%d")
+            for raw_title in titles or []:
+                # 兼容两种条目：纯字符串（旧格式）/ {"name":..., "type":...}（CI 新格式，带分类）
+                if isinstance(raw_title, dict):
+                    title = str(raw_title.get("name") or "").strip()
+                    hint_type = str(raw_title.get("type") or "").strip()
+                else:
+                    title = str(raw_title or "").strip()
+                    hint_type = ""
+                if not title or _KDOCS_NOISE_RE.search(title):
+                    continue
+                if re.match(DATE_LINE_RE, title):
+                    continue  # 混入的下一节标题行
+                mtype = hint_type if hint_type in ("movie", "tv") else (
+                    "movie" if cls._looks_like_movie(title) else "tv"
+                )
+                name = cls._clean_title(title)
+                if not name:
+                    continue
+                items.append(_MediaItem(
+                    platform=cls.platform_key,
+                    platform_label=cls.platform_label,
+                    mtype=mtype,
+                    mtype_label="电影" if mtype == "movie" else "电视剧",
+                    name=name,
+                    year=extract_year(title),
+                    online_date=online_str,
+                    extra={"source": "kdocs", "section": str(section_date), "raw": title[:120]},
+                ))
+        logger.info(f"[影视上新] 云盘资源：解析到 {len(items)} 条候选（快照更新时间 {payload.get('updated_at', '未知')}）")
+        return items
+
+    @staticmethod
+    def _looks_like_movie(title: str) -> bool:
+        """根据片名特征判断是否电影（云盘快照里电影一般带【电影上线】或片名+年份+地区类型）。"""
+        if "电影上线" in title or "【电影" in title:
+            return True
+        # 形如 "名称 (2026)][美国 动作 科幻 4K]" 的电影命名风格
+        if re.search(r"[\]］]\s*[\[（(]?\d{4}[\)）]?[\]］]", title):
+            return True
+        return False
+
+    @staticmethod
+    def _clean_title(title: str) -> str:
+        """
+        清洗片名，去掉画质/集数/来源等附加信息，只留主名。
+
+        例：
+            "仙逆 年番 4K 更新至 162"           -> "仙逆 年番"
+            "无可替代 4K【超前全 20 集】"        -> "无可替代"
+            "蜘蛛侠：崭新之日 (2026)][美国 动作 科幻 4K][IMAX][汤姆·赫兰德、赞达亚]【电影上线】"
+                                              -> "蜘蛛侠：崭新之日"
+        """
+        text = title.strip()
+        # 去掉【电影上线】等标记（避免触发内容过滤的「上线」排除词）与【..】说明块
+        text = re.sub(r"【[^】]*】", "", text)
+        # 去掉 "][...][..." 资源描述块（电影命名风格）
+        text = re.sub(r"\]\s*\[[^\]]*\]", "", text)
+        # 去掉 "更新至 xx / 第 xx 集 / 全 xx 集" 等集数信息
+        text = EPISODE_PATTERN.sub("", text)
+        text = re.sub(r"全\s*\d+\s*集|全集|完结", "", text)
+        # 去掉画质与来源尾巴：4K / 2160p / HDR / 年番保留（属作品名一部分则不动，仅去掉画质词）
+        text = re.sub(r"\b(4K|8K|2160p|1080p|720p|HDR|杜比|IMAX)\b", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"(4K|8K|2160p|1080p|720p|HDR)", "", text, flags=re.IGNORECASE)
+        # 去掉年份（年份单独存 year 字段，避免重复）
+        text = re.sub(r"[\(（\[【]?\s*(19|20)\d{2}\s*[\)）\]】]?", "", text)
+        # 收尾清理
+        text = re.sub(r"[\]］〕]+$", "", text).strip(" 　:-·、，,")
+        return text.strip()
+
+    @staticmethod
+    def _download(url: str) -> Optional[str]:
+        """下载快照，优先直连，失败时尝试宿主 GITHUB_PROXY 加速。"""
+        text = http_request(url, timeout=25, retries=1)
+        if text:
+            return text
+        try:
+            proxy = str(getattr(settings, "GITHUB_PROXY", "") or "").strip()
+        except Exception:
+            proxy = ""
+        if proxy and not url.startswith(proxy):
+            if not proxy.endswith("/"):
+                proxy += "/"
+            return http_request(UrlJoin(proxy, url), timeout=25, retries=1)
+        return None
+
+
+def UrlJoin(base: str, url: str) -> str:
+    """简单拼接代理前缀与原始 URL。"""
+    return base.rstrip("/") + "/" + url.lstrip("/")
+
+
+# ============================================================================
 # 七、去重库（插件数据目录下的 JSON 文件）
 # ============================================================================
 
@@ -1370,11 +1522,11 @@ class StreamingNewAlert(_PluginBase):
 
     # ---------------------------- 插件元信息 ----------------------------
     plugin_name = "影视平台上新提醒"
-    plugin_desc = "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，按平台分组推送提醒，永久去重不重复打扰。"
+    plugin_desc = "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，并接入金山文档云盘资源每日更新表，按平台分组推送提醒，永久去重不重复打扰。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.1.4"
-    plugin_author = "MoviePilot Plugin"
-    author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
+    plugin_version = "1.2.0"
+    plugin_author = "hmily"
+    author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "streamingnew_"
     plugin_order = 60
     auth_level = 1
@@ -1392,6 +1544,8 @@ class StreamingNewAlert(_PluginBase):
         self._api_token = ""
         self._use_tmdb = True
         self._tmdb_key = ""
+        self._kdocs_enabled = True
+        self._kdocs_data_url = ""
         self._strict_dates = False
         self._onlyonce = False
         self._history: Optional[_PushHistory] = None
@@ -1418,6 +1572,9 @@ class StreamingNewAlert(_PluginBase):
             # TMDB：默认开启，Key 留空则自动复用 MoviePilot 系统设置里的 TMDB API Key
             self._use_tmdb = bool(config.get("use_tmdb", True))
             self._tmdb_key = _TmdbSource.resolve_api_key(config.get("tmdb_api_key") or "")
+            # 云盘资源数据源（金山文档每日更新表的 JSON 快照）
+            self._kdocs_enabled = bool(config.get("kdocs_enabled", True))
+            self._kdocs_data_url = str(config.get("kdocs_data_url") or "").strip()
             # strict / loose：拿不到上线日期时是否仍然推送
             self._strict_dates = str(config.get("date_mode") or "loose").lower() == "strict"
             self._onlyonce = bool(config.get("onlyonce"))
@@ -1434,7 +1591,8 @@ class StreamingNewAlert(_PluginBase):
             logger.info(
                 f"[影视上新] 插件已启用：平台={self._enabled_platforms()} "
                 f"类型={self._enabled_types()} 时间={self._cron} 范围={self._days} 天 "
-                f"TMDB={'已启用' if (self._use_tmdb and self._tmdb_key) else '未启用'}"
+                f"TMDB={'已启用' if (self._use_tmdb and self._tmdb_key) else '未启用'} "
+                f"云盘={'已启用' if self._kdocs_enabled else '未启用'}"
             )
 
             # 配置页勾选「立即执行一次」：交给宿主调度器延迟 3 秒执行，避免阻塞保存流程
@@ -1622,6 +1780,30 @@ class StreamingNewAlert(_PluginBase):
                         ],
                     },
                     {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                                {
+                                    "component": "VSwitch",
+                                    "props": {
+                                        "model": "kdocs_enabled",
+                                        "label": "云盘资源上新（金山文档）",
+                                        "hint": "拉取金山文档每日更新的云盘影视快照，随每日检查一并推送",
+                                        "persistent-hint": True,
+                                    },
+                                }]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [
+                                {
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "kdocs_data_url",
+                                        "label": "快照地址（可选）",
+                                        "placeholder": "留空使用插件仓库自动生成的默认快照",
+                                    },
+                                }]},
+                        ],
+                    },
+                    {
                         "component": "VAlert",
                         "props": {
                             "type": "info",
@@ -1647,6 +1829,8 @@ class StreamingNewAlert(_PluginBase):
             "api_token": "",
             "use_tmdb": True,
             "tmdb_api_key": "",
+            "kdocs_enabled": True,
+            "kdocs_data_url": "",
             "date_mode": "loose",
         }
 
@@ -1950,6 +2134,41 @@ class StreamingNewAlert(_PluginBase):
                 )
                 summary["platforms"][platform_label] = {"error": str(err)}
                 continue
+
+        # 云盘资源数据源（金山文档每日更新表的 JSON 快照）
+        if self._kdocs_enabled:
+            try:
+                cloud_candidates = _KdocsCloudSource.fetch(
+                    days=self._days, data_url=self._kdocs_data_url
+                )
+                summary["platforms"]["云盘资源"] = {"候选": len(cloud_candidates)}
+                summary["candidates"] += len(cloud_candidates)
+
+                cloud_kept: List[_MediaItem] = []
+                for item in cloud_candidates:
+                    ok, reason = content_filter.check(item, item.extra)
+                    if not ok:
+                        summary["filtered"] += 1
+                        logger.debug(f"[影视上新] 过滤《{item.name}》：{reason}")
+                        continue
+                    if self._history.contains(item.dedup_key):
+                        summary["duplicated"] += 1
+                        continue
+                    cloud_kept.append(item)
+
+                batch_seen = set()
+                for item in cloud_kept:
+                    if item.dedup_key in batch_seen:
+                        continue
+                    batch_seen.add(item.dedup_key)
+                    new_items.append(item)
+                summary["platforms"]["云盘资源"]["新增"] = len(batch_seen)
+            except Exception as err:
+                # 云盘源异常不影响平台数据源
+                logger.error(
+                    f"[影视上新] 云盘资源抓取失败，已跳过：{err}\n{traceback.format_exc()}"
+                )
+                summary["platforms"]["云盘资源"] = {"error": str(err)}
 
         # 推送
         if not new_items:

@@ -1,11 +1,11 @@
 {
   "id": "StreamingNewAlert",
   "name": "影视平台上新提醒",
-  "description": "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，按平台分组推送提醒，按「平台+类型+名称+年份」永久去重。",
-  "version": "1.1.4",
+  "description": "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，并接入金山文档云盘资源每日更新表，按平台分组推送提醒，按「平台+类型+名称+年份」永久去重。",
+  "version": "1.2.0",
   "icon": "Moviepilot_A.png",
-  "author": "MoviePilot Plugin",
-  "author_url": "https://github.com/jxxghp/MoviePilot-Plugins",
+  "author": "hmily",
+  "author_url": "https://github.com/hmily91/MoviePilot-Plugins",
   "level": 1,
   "labels": "影视,通知",
   "system_version": ">=3.0.0",
@@ -18,7 +18,8 @@
     "v1.1.1": "修复加载失败：插件物理目录名必须为插件ID小写（MoviePilot V3 加载器硬性要求），并加固宿主依赖导入，任何导入异常不再导致插件加载失败。",
     "v1.1.2": "新增模块加载自检日志；配合 GitHub Release 安装通道（资产带 ZIP 校验，避免文件列表下载不完整导致加载失败）。",
     "v1.1.3": "修复插件加载失败：移除模块命名空间的公开基类别名 PluginBase，并将辅助类统一改为下划线前缀，确保加载器遍历时能命中真正的插件类 StreamingNewAlert（此前会先命中基类并中断扫描）。",
-    "v1.1.4": "修复所有外部请求失败：MoviePilot V3 的 settings.PROXY 为字典形态，此前被 str() 后当作主机名解析导致请求全部报 'Failed to parse'。现按 dict/str 两种形态归一化处理，并在代理不可用时自动降级为直连。"
+    "v1.1.4": "修复所有外部请求失败：MoviePilot V3 的 settings.PROXY 为字典形态，此前被 str() 后当作主机名解析导致请求全部报 'Failed to parse'。现按 dict/str 两种形态归一化处理，并在代理不可用时自动降级为直连。",
+    "v1.2.0": "新增云盘资源数据源：接入金山文档每日更新的影视上新表（由插件仓库 GitHub Actions 每天自动生成 JSON 快照，插件定时拉取并按「平台+类型+名称+年份」永久去重推送）。同时把插件作者署名改为 hmily。"
   },
   "config": {
     "enabled": false,
