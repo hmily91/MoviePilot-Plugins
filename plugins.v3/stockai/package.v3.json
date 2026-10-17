@@ -3,7 +3,7 @@
   "description": "获取沪深A股行情与近5日K线，复用系统智能助手或自定义LLM接口进行技术面/走势/风险提示分析，定时推送早盘预判与收盘报告。",
   "labels": "股票,AI分析,定时推送,A股",
   "version": "1.1.4",
-  "icon": "stockai.png",
+  "icon": "stockai-v2.png",
   "author": "hmily",
   "level": 1,
   "system_version": ">=3.0.0",
