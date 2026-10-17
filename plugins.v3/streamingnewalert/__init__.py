@@ -815,6 +815,8 @@ class _TmdbSource:
         self._lock = threading.Lock()
         # 上次请求成功的域名，后续请求直接复用，避免每次重新探测
         self._working_domain: str = ""
+        # TMDB 是否仍提供中国大陆观看平台数据（None = 尚未探测）
+        self._cn_supported: Optional[bool] = None
 
     # ------------------------------------------------------------------ 基础
 
@@ -854,6 +856,56 @@ class _TmdbSource:
             return str(getattr(settings, "TMDB_API_KEY", "") or "").strip()
         return ""
 
+    # ------------------------------------------------------- 中国大陆可用性
+
+    def check_cn_region(self, api_key: str) -> bool:
+        """
+        探测 TMDB 是否仍然提供中国大陆（CN）的观看平台数据。
+
+        实测结论（2026-10）：TMDB 的 /watch/providers/regions 已不再包含 CN，
+        且带 watch_region=CN 查询观看平台列表会直接返回空数组 —— 即 TMDB
+        已下线中国大陆的观看平台数据（其数据提供方 JustWatch 退出中国市场）。
+
+        该方法只探测一次并缓存结果，用于把「数据源下线」与「网络故障 / Key 失效」
+        区分开，避免把两者都笼统记成「请求失败」而误导排查方向。
+
+        :param api_key: TMDB API Key
+        :return: True 表示 CN 仍在支持地区列表内
+        """
+        if self._cn_supported is not None:
+            return self._cn_supported
+        if not api_key:
+            return False
+
+        for domain in self._candidate_domains():
+            url = f"https://{domain}/3/watch/providers/regions?api_key={api_key}"
+            try:
+                data = load_json_or_none(http_request(url, headers=build_headers(),
+                                                      timeout=15, retries=1) or "")
+            except Exception as err:  # noqa: BLE001
+                logger.warn(f"[影视上新] TMDB 地区列表请求失败（{domain}）：{err}")
+                continue
+            regions = (data or {}).get("results") or []
+            if not regions:
+                continue
+            supported = any(
+                str(r.get("iso_3166_1") or "").upper() == self.REGION for r in regions
+            )
+            self._cn_supported = supported
+            if supported:
+                logger.info(f"[影视上新] TMDB 观看平台支持地区包含 {self.REGION}（{domain}）")
+            else:
+                logger.warn(
+                    f"[影视上新] TMDB 已不支持 {self.REGION} 地区（共 {len(regions)} 个地区，"
+                    f"不含 {self.REGION}）。其中国大陆观看平台数据已下线（数据方 JustWatch 退出中国），"
+                    f"爱奇艺 / 优酷 / 腾讯视频均无法通过 TMDB 观看平台接口查询，"
+                    f"本插件将完全依赖各平台直抓数据源。这不是网络或 API Key 问题，无需排查代理。"
+                )
+            return supported
+
+        # 全部域名都拿不到地区列表：无法判定，按「仍支持」处理，交由后续查询自然失败
+        return True
+
     # ------------------------------------------------------------------ 平台ID
 
     def _provider_id(self, kind: str, platform_key: str, api_key: str) -> Optional[int]:
@@ -880,8 +932,10 @@ class _TmdbSource:
 
         last_error = ""
         for domain in self._candidate_domains():
-            url = f"https://{domain}/3/watch/providers/{kind}" \
-                  f"?api_key={api_key}&watch_region={self.REGION}"
+            # 注意：这里不能带 watch_region=CN。
+            # 实测带该参数时接口直接返回 {"results":[]}（CN 已从支持地区移除），
+            # 不带则返回全球全部 provider（约 820 个）再自行按名称匹配。
+            url = f"https://{domain}/3/watch/providers/{kind}?api_key={api_key}"
             data: Optional[Dict[str, Any]] = None
             try:
                 text = http_request(url, headers=build_headers(), timeout=15, retries=1)
@@ -895,7 +949,7 @@ class _TmdbSource:
             if not providers:
                 last_error = str((data or {}).get("status_message") or "返回空列表")
                 logger.warn(f"[影视上新] TMDB 观看平台列表为空（{domain}）：{last_error}"
-                            f"（多为 API Key 无效）")
+                            f"（多为 API Key 无效，或该地区数据已下线）")
                 continue
 
             for provider in providers:
@@ -943,6 +997,18 @@ class _TmdbSource:
         :param api_key: TMDB API Key
         """
         kind = "movie" if mtype == "movie" else "tv"
+
+        # TMDB 已下线 CN 观看平台数据：此时即便解析到 provider_id，
+        # discover 带 watch_region=CN 也必然返回 0 条（实测 total_results=0），
+        # 不带 watch_region 又会让 with_watch_providers 被忽略（返回全球全量）。
+        # 因此直接短路，避免每平台每类型白跑两次请求。
+        if not self.check_cn_region(api_key):
+            logger.info(
+                f"[影视上新] TMDB 无 {self.REGION} 地区观看平台数据，"
+                f"{platform_label} 跳过 TMDB 查询，改用平台直抓数据源"
+            )
+            return []
+
         provider_id = self._provider_id(kind, platform_key, api_key)
         if not provider_id:
             logger.warn(
@@ -2165,7 +2231,17 @@ class StreamingNewAlert(_PluginBase):
                     providers[kind] = tmdb._load_providers(kind, tmdb_key)
                 except Exception as err:
                     providers[kind] = f"失败：{err}"
+            try:
+                cn_ok = tmdb.check_cn_region(tmdb_key)
+            except Exception as err:  # noqa: BLE001
+                cn_ok = f"失败：{err}"
             report["TMDB"] = providers
+            report["TMDB_CN地区可用"] = cn_ok
+            if cn_ok is False:
+                report["TMDB_说明"] = (
+                    "TMDB 已下线中国大陆观看平台数据，优酷/腾讯/爱奇艺均无法通过 TMDB 查询，"
+                    "本插件已改用各平台直抓数据源（非网络故障，无需排查代理）"
+                )
         return {"success": True, "data": report}
 
     def api_clear(self) -> Dict[str, Any]:
