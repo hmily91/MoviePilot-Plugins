@@ -103,7 +103,7 @@ class StockAi(_PluginBase):
     # ---------------------- 插件元数据（V3 规范必填） ---------------------- #
     plugin_name = "股票AI分析助手"
     plugin_desc = "获取沪深A股行情，调用LLM进行技术面/走势/风险提示分析，并定时推送早盘预判与收盘报告；支持历史分析前端页面。"
-    plugin_icon = "StockAi.png"
+    plugin_icon = "stockai-v2.png"
     plugin_version = "1.1.5"
     plugin_author = "hmily"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
