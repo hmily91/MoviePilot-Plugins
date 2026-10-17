@@ -5,7 +5,8 @@ MJJSpeed 站点自动签到插件（MoviePilot V3）
 能力概览：
     1. 多站点管理：内置 7 个默认站点，支持在配置中手动增删站点域名（所有站点页面结构一致，仅域名不同）
     2. 账号密码登录：无需手工抓取 Cookie，输入邮箱+密码自动完成表单登录，登录态按站点独立保存
-    3. 自动签到：注册系统级定时任务，默认每日 01:00 自动签到，时间可配置；支持命令/API 手动立即签到
+    3. 自动签到：注册系统级定时任务，默认 Cron「0 1 * * *」（每日 01:00）自动签到，时间支持任意 Cron 表达式；
+       支持命令/API 手动立即签到
     4. 结果通知：签到完成后通过 MoviePilot 系统通知推送成功/失败结果
     5. 异常处理：网络超时、登录失败、今日已签到、站点不可用等场景分别捕获并记录日志
 """
@@ -13,6 +14,8 @@ MJJSpeed 站点自动签到插件（MoviePilot V3）
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
 from app.core.event import eventmanager, Event
@@ -38,7 +41,7 @@ class mjjspeed_checkin(_PluginBase):
     # 插件图标（仓库中的图标文件名）
     plugin_icon = "mjjspeed.png"
     # 插件版本，需与 package.v3.json 中的 version 保持一致
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     # 插件分类
     plugin_label = "工具"
     # 插件作者
@@ -67,7 +70,9 @@ class mjjspeed_checkin(_PluginBase):
     DEFAULT_EMAIL: str = ""
     # 默认登录密码（默认留空，避免泄露，请在配置中填写）
     DEFAULT_PASSWORD: str = ""
-    # 默认签到时间（每日）
+    # 默认签到时间（Cron 表达式：分 时 日 月 周，0 1 * * * 即每日 01:00）
+    DEFAULT_CRON: str = "0 1 * * *"
+    # 兼容旧配置的 HH:MM 默认值
     DEFAULT_CHECKIN_TIME: str = "01:00"
     # 默认登录接口路径
     DEFAULT_LOGIN_PATH: str = "/auth/login"
@@ -89,7 +94,7 @@ class mjjspeed_checkin(_PluginBase):
     _sites: List[str] = []
     _email: str = ""
     _password: str = ""
-    _checkin_time: str = DEFAULT_CHECKIN_TIME
+    _cron: str = DEFAULT_CRON
     _login_path: str = DEFAULT_LOGIN_PATH
     _checkin_path: str = DEFAULT_CHECKIN_PATH
     _retry: int = 3
@@ -111,7 +116,7 @@ class mjjspeed_checkin(_PluginBase):
         self._sites = []
         self._email = ""
         self._password = ""
-        self._checkin_time = self.DEFAULT_CHECKIN_TIME
+        self._cron = self.DEFAULT_CRON
         self._login_path = self.DEFAULT_LOGIN_PATH
         self._checkin_path = self.DEFAULT_CHECKIN_PATH
         self._retry = 3
@@ -128,14 +133,15 @@ class mjjspeed_checkin(_PluginBase):
         self._sites = self.__parse_sites(conf.get("sites"))
         self._email = str(conf.get("email") or self.DEFAULT_EMAIL).strip()
         self._password = str(conf.get("password") or self.DEFAULT_PASSWORD)
-        self._checkin_time = self.__parse_checkin_time(conf.get("checkin_time"))
+        # 签到时间优先取 Cron 表达式，无则兼容旧版 HH:MM 配置
+        self._cron = self.__parse_cron(conf.get("cron") or conf.get("checkin_time"))
         self._login_path = self.__parse_path(conf.get("login_path"), self.DEFAULT_LOGIN_PATH)
         self._checkin_path = self.__parse_path(conf.get("checkin_path"), self.DEFAULT_CHECKIN_PATH)
         self._retry = self.__parse_retry(conf.get("retry"))
         # 读取每个站点持久化的登录态与签到记录
         self._states = self.get_data("states") or {}
         if self._enabled:
-            logger.info(f"[MJJSpeed] 插件已启用，站点数：{len(self._sites)}，每日 {self._checkin_time} 自动签到，"
+            logger.info(f"[MJJSpeed] 插件已启用，站点数：{len(self._sites)}，签到 Cron：{self._cron}，"
                         f"失败重试 {self._retry} 次")
         else:
             logger.info("[MJJSpeed] 插件未启用")
@@ -262,11 +268,11 @@ class mjjspeed_checkin(_PluginBase):
                                     {
                                         "component": "VTextField",
                                         "props": {
-                                            "model": "checkin_time",
-                                            "label": "签到时间",
-                                            "type": "time",
-                                            "placeholder": "01:00",
-                                            "hint": "每日自动签到时间"
+                                            "model": "cron",
+                                            "label": "签到时间（Cron）",
+                                            "placeholder": "0 1 * * *",
+                                            "hint": "Cron 表达式（分 时 日 月 周），如 0 1 * * * = 每天 01:00；"
+                                                    "0 9 * * 1 = 每周一 09:00；*/30 * * * * = 每 30 分钟"
                                         }
                                     }
                                 ]
@@ -342,7 +348,7 @@ class mjjspeed_checkin(_PluginBase):
                 "component": "VAlert",
                 "props": {
                     "type": "info",
-                    "text": f"共 {len(self._sites)} 个站点，每日 {self._checkin_time} 自动签到，"
+                    "text": f"共 {len(self._sites)} 个站点，签到 Cron：{self._cron}，"
                             f"失败重试 {self._retry} 次；发送 /mjjspeed_checkin 命令可立即签到。"
                 }
             }
@@ -372,14 +378,17 @@ class mjjspeed_checkin(_PluginBase):
         """注册系统级定时任务（每日自动签到）。"""
         if not self._enabled:
             return []
-        hour, minute = self.__parse_hour_minute(self._checkin_time)
+        trigger = self.__build_trigger(self._cron)
+        if trigger is None:
+            logger.error(f"[MJJSpeed] Cron 表达式无效：{self._cron}，定时任务未注册")
+            return []
         return [
             {
                 "id": "mjjspeed_checkin",
-                "name": f"MJJSpeed 每日签到（{self._checkin_time}）",
-                "trigger": "cron",
+                "name": f"MJJSpeed 自动签到（{self._cron}）",
+                "trigger": trigger,
                 "func": self.checkin_all,
-                "kwargs": {"hour": hour, "minute": minute}
+                "kwargs": {}
             }
         ]
 
@@ -618,7 +627,7 @@ class mjjspeed_checkin(_PluginBase):
             "sites": self.DEFAULT_SITES,
             "email": "",
             "password": "",
-            "checkin_time": self.DEFAULT_CHECKIN_TIME,
+            "cron": self.DEFAULT_CRON,
             "login_path": self.DEFAULT_LOGIN_PATH,
             "checkin_path": self.DEFAULT_CHECKIN_PATH,
             "retry": 3
@@ -715,24 +724,41 @@ class mjjspeed_checkin(_PluginBase):
         return sites
 
     @staticmethod
-    def __parse_checkin_time(value: Any) -> str:
-        """校验签到时间格式（HH:MM），非法时回退默认值。"""
+    def __parse_cron(value: Any) -> str:
+        """
+        归一化签到时间为 5 段 Cron 表达式（分 时 日 月 周）。
+
+        兼容旧版 HH:MM 配置，例如 01:00 会转换为 0 1 * * *；非法表达式回退默认值。
+        """
         text = str(value or "").strip()
-        try:
-            hour_str, minute_str = text.split(":")
-            hour, minute = int(hour_str), int(minute_str)
-            if 0 <= hour <= 23 and 0 <= minute <= 59:
-                return f"{hour:02d}:{minute:02d}"
-        except (ValueError, AttributeError):
-            pass
-        return mjjspeed_checkin.DEFAULT_CHECKIN_TIME
+        if not text:
+            return mjjspeed_checkin.DEFAULT_CRON
+        # 旧版 HH:MM 自动转换为 Cron
+        if ":" in text and len(text.split()) == 1:
+            try:
+                hour_str, minute_str = text.split(":")
+                hour, minute = int(hour_str), int(minute_str)
+                if 0 <= hour <= 23 and 0 <= minute <= 59:
+                    return f"{minute} {hour} * * *"
+            except (ValueError, AttributeError):
+                return mjjspeed_checkin.DEFAULT_CRON
+        # 校验 Cron 表达式是否可被解析
+        if mjjspeed_checkin.__build_trigger(text) is None:
+            return mjjspeed_checkin.DEFAULT_CRON
+        return text
 
     @staticmethod
-    def __parse_hour_minute(value: str) -> Tuple[int, int]:
-        """把 HH:MM 拆分为 APScheduler cron 需要的小时与分钟。"""
-        text = mjjspeed_checkin.__parse_checkin_time(value)
-        hour_str, minute_str = text.split(":")
-        return int(hour_str), int(minute_str)
+    def __build_trigger(value: str) -> Optional[CronTrigger]:
+        """
+        把 Cron 表达式转换为 APScheduler 触发器，非法时返回 None。
+
+        :param value: 5 段 Cron 表达式
+        :return: CronTrigger 实例或 None
+        """
+        try:
+            return CronTrigger.from_crontab(str(value or "").strip())
+        except Exception:
+            return None
 
     @staticmethod
     def __parse_path(value: Any, default: str) -> str:
