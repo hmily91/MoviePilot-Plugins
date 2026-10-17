@@ -2,7 +2,7 @@
   "id": "mjjspeed_checkin",
   "name": "MJJSpeed站点自动签到",
   "description": "支持MJJSpeed系列站点账号密码自动登录+每日自动签到，支持自定义域名，无需手动获取Cookie。",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "icon": "mjjspeed-v2.png",
   "author": "hmily",
   "author_url": "https://github.com/hmily91/MoviePilot-Plugins",
