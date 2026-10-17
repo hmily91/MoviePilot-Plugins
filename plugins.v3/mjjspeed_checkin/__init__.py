@@ -39,7 +39,7 @@ class mjjspeed_checkin(_PluginBase):
     # 插件描述
     plugin_desc = "支持MJJSpeed系列站点账号密码自动登录+每日自动签到，支持自定义域名，无需手动获取Cookie。"
     # 插件图标（仓库中的图标文件名）
-    plugin_icon = "mjjspeed.png"
+    plugin_icon = "mjjspeed-v2.png"
     # 插件版本，需与 package.v3.json 中的 version 保持一致
     plugin_version = "1.2.0"
     # 插件分类
