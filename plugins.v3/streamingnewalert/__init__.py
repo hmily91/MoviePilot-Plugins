@@ -230,6 +230,9 @@ DATE_KEYS: Tuple[str, ...] = (
     "publishDate", "onlineDate", "releaseDate", "firstPublishTime", "publishTime",
     "onlineTime", "releaseTime", "publishTimeStamp", "upDate", "updateTime", "showDate",
     "issueDate", "airDate", "launchDate", "date", "time", "datetime", "startTime",
+    # 下划线风格：TMDB 与部分开放平台使用
+    "release_date", "first_air_date", "online_date", "show_date", "air_date",
+    "published", "published_at", "publishedAt", "publish_at", "created_at",
 )
 
 # 常见年份字段
@@ -803,20 +806,39 @@ class _TmdbSource:
         "tv": {10764, 10767},
     }
 
+    # 国内网络直连 api.themoviedb.org 普遍超时（实测 http 000），
+    # 因此把可达镜像排在官方域名之前，逐个探测直到拿到数据
+    DOMAIN_FALLBACKS: Tuple[str, ...] = ("api.tmdb.org", "api.themoviedb.org")
+
     def __init__(self):
         self._provider_cache: Dict[str, Dict[str, Optional[int]]] = {}
         self._lock = threading.Lock()
+        # 上次请求成功的域名，后续请求直接复用，避免每次重新探测
+        self._working_domain: str = ""
 
     # ------------------------------------------------------------------ 基础
 
-    @staticmethod
-    def _base_url() -> str:
-        """TMDB API 根地址（优先使用 MoviePilot 系统设置里的镜像域名）。"""
-        domain = "api.themoviedb.org"
+    @classmethod
+    def _candidate_domains(cls) -> List[str]:
+        """按优先级返回待尝试的 API 域名（已去重）。
+
+        顺序：MoviePilot 系统设置的 TMDB_API_DOMAIN → 国内可达镜像 → 官方域名。
+        """
+        domains: List[str] = []
+        configured = ""
         if settings is not None:
-            domain = str(getattr(settings, "TMDB_API_DOMAIN", "") or domain).strip() or domain
-        domain = domain.replace("https://", "").replace("http://", "").rstrip("/")
-        return f"https://{domain}/3"
+            configured = str(getattr(settings, "TMDB_API_DOMAIN", "") or "").strip()
+        for raw in (configured, *cls.DOMAIN_FALLBACKS):
+            domain = raw.replace("https://", "").replace("http://", "").strip().rstrip("/")
+            if domain and domain not in domains:
+                domains.append(domain)
+        return domains
+
+    def _base_url(self) -> str:
+        """当前可用的 API 根地址：优先复用上次成功的域名。"""
+        if self._working_domain:
+            return f"https://{self._working_domain}/3"
+        return f"https://{self._candidate_domains()[0]}/3"
 
     @staticmethod
     def resolve_api_key(config_key: str = "") -> str:
@@ -841,19 +863,42 @@ class _TmdbSource:
             cached = self._provider_cache.get(cache_key)
         if cached is None:
             cached = self._load_providers(kind, api_key)
-            with self._lock:
-                self._provider_cache[cache_key] = cached
+            # 只有解析到至少一个平台才写入缓存；
+            # 否则一次网络抖动会把「全 null」永久缓存，后续任务不再重试
+            if any(cached.values()):
+                with self._lock:
+                    self._provider_cache[cache_key] = cached
         return cached.get(platform_key)
 
     def _load_providers(self, kind: str, api_key: str) -> Dict[str, Optional[int]]:
         """拉取 watch providers 列表并按别名匹配三大平台。"""
         result: Dict[str, Optional[int]] = {key: None for key in self.PROVIDER_ALIASES}
-        url = f"{self._base_url()}/watch/providers/{kind}" \
-              f"?api_key={api_key}&watch_region={self.REGION}"
-        try:
-            text = http_request(url, headers=build_headers())
-            data = load_json_or_none(text or "")
-            for provider in (data or {}).get("results", []):
+        if not api_key:
+            logger.error("[影视上新] TMDB API Key 为空，无法查询观看平台，"
+                         "请在 MoviePilot 系统设置或插件配置中填写 TMDB API Key")
+            return result
+
+        last_error = ""
+        for domain in self._candidate_domains():
+            url = f"https://{domain}/3/watch/providers/{kind}" \
+                  f"?api_key={api_key}&watch_region={self.REGION}"
+            data: Optional[Dict[str, Any]] = None
+            try:
+                text = http_request(url, headers=build_headers(), timeout=15, retries=1)
+                data = load_json_or_none(text or "")
+            except Exception as err:
+                last_error = f"{domain} 请求异常：{err}"
+                logger.warn(f"[影视上新] TMDB 观看平台列表请求失败（{domain}）：{err}")
+                continue
+
+            providers = (data or {}).get("results") or []
+            if not providers:
+                last_error = str((data or {}).get("status_message") or "返回空列表")
+                logger.warn(f"[影视上新] TMDB 观看平台列表为空（{domain}）：{last_error}"
+                            f"（多为 API Key 无效）")
+                continue
+
+            for provider in providers:
                 name = str(provider.get("provider_name") or "").lower()
                 for key, aliases in self.PROVIDER_ALIASES.items():
                     if result.get(key):
@@ -862,9 +907,20 @@ class _TmdbSource:
                         if alias in name:
                             result[key] = provider.get("provider_id")
                             break
-        except Exception as err:
-            logger.warn(f"[影视上新] TMDB 观看平台列表获取失败：{err}")
-        logger.debug(f"[影视上新] TMDB provider 解析结果：{result}")
+
+            self._working_domain = domain
+            if all(result.get(key) for key in self.PROVIDER_ALIASES):
+                logger.info(f"[影视上新] TMDB 观看平台解析成功（{domain}）：{result}")
+            else:
+                sample = "、".join(
+                    str(p.get("provider_name")) for p in providers[:30]
+                )
+                logger.warn(f"[影视上新] TMDB 观看平台部分未匹配（{domain}）：{result}；"
+                            f"返回列表前 30 个：{sample}")
+            return result
+
+        logger.error(f"[影视上新] TMDB 观看平台列表在所有域名下均失败，"
+                     f"最后错误：{last_error}；已尝试域名：{self._candidate_domains()}")
         return result
 
     # ------------------------------------------------------------------ 查询
@@ -981,6 +1037,7 @@ class _PlatformFetcher:
         api_token: str = "",
         tmdb_key: str = "",
         days: int = 7,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> List[_MediaItem]:
         """
         抓取指定内容类型的新上线内容。
@@ -995,6 +1052,7 @@ class _PlatformFetcher:
         :param api_token: 自定义 API 的 Bearer Token（可选）
         :param tmdb_key: TMDB API Key，为空表示不使用 TMDB
         :param days: 只取近 N 天内上线的内容
+        :param extra: 平台专属的附加配置（如优酷开放平台的 client_id）
         """
         items: List[_MediaItem] = []
 
@@ -1164,10 +1222,20 @@ class _IQiyiFetcher(_PlatformFetcher):
 
 
 class _YoukuFetcher(_PlatformFetcher):
-    """优酷数据源。"""
+    """优酷数据源。
+
+    优酷旧分类页（/category/show/c_96|c_97*.html）已整体下线：实测全部 301/302
+    跳转到 /ku/webhome 首页，且内容为前端渲染，HTML 抓取通道不再产出任何数据。
+    因此这里补充「优酷开放平台 v2」通道，需用户自行申请 client_id 后填到插件配置。
+    未配置 client_id 时，优酷仍可走 TMDB 通道（TMDB 上有 Youku 观看平台）。
+    """
 
     platform_key = "youku"
     platform_label = "优酷"
+
+    # 优酷开放平台 v2：实测端点存活，缺少 client_id 时返回 code 1004
+    OPENAPI_URL = "https://openapi.youku.com/v2/shows/by_category.json"
+    OPENAPI_CATEGORIES = {"movie": "电影", "tv": "电视剧"}
 
     ENDPOINTS = {
         "movie": [
@@ -1199,6 +1267,70 @@ class _YoukuFetcher(_PlatformFetcher):
             },
         ],
     }
+
+    def fetch(
+        self,
+        mtype: str,
+        api_base: str = "",
+        api_token: str = "",
+        tmdb_key: str = "",
+        days: int = 7,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> List[_MediaItem]:
+        """先走通用通道（TMDB / 自定义 API / 旧 HTML），再尝试开放平台。"""
+        items = super().fetch(
+            mtype=mtype, api_base=api_base, api_token=api_token,
+            tmdb_key=tmdb_key, days=days, extra=extra,
+        )
+        if items:
+            return items
+
+        client_id = str((extra or {}).get("youku_client_id") or "").strip()
+        if not client_id:
+            logger.warn("[影视上新] 优酷未配置开放平台 client_id，且通用通道无数据，"
+                        "本次无候选（可在插件配置中填写 youku_client_id 恢复优酷）")
+            return []
+
+        items = self._fetch_openapi(mtype, client_id)
+        if items:
+            logger.info(f"[影视上新] 优酷·{CONTENT_TYPES.get(mtype)} "
+                        f"开放平台返回 {len(items)} 条候选")
+        return items
+
+    def _fetch_openapi(self, mtype: str, client_id: str) -> List[_MediaItem]:
+        """通过优酷开放平台 v2 按分类拉取节目列表。"""
+        category = self.OPENAPI_CATEGORIES.get(mtype, "")
+        if not category:
+            return []
+        params = {
+            "client_id": client_id,
+            "category": category,
+            "page": 1,
+            "count": 50,
+            "orderby": "published",
+        }
+        url = f"{self.OPENAPI_URL}?{urlencode(params)}"
+        try:
+            text = http_request(url, headers=build_headers("https://www.youku.com/"))
+            data = load_json_or_none(text or "")
+        except Exception as err:
+            logger.warn(f"[影视上新] 优酷开放平台请求失败：{err}")
+            return []
+        if not isinstance(data, dict):
+            return []
+        if data.get("error"):
+            logger.warn(f"[影视上新] 优酷开放平台返回错误：{data.get('error')}")
+            return []
+
+        raw_items = data.get("shows") or data.get("videos") or []
+        items: List[_MediaItem] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            item = self._to_media_item(raw, mtype)
+            if item:
+                items.append(item)
+        return items
 
 
 class _TencentFetcher(_PlatformFetcher):
@@ -1542,6 +1674,8 @@ class StreamingNewAlert(_PluginBase):
         self._notify_title = "🎬 影视平台上新提醒"
         self._api_base = ""
         self._api_token = ""
+        # 优酷开放平台 client_id（用户自行申请，留空则优酷仅走 TMDB 通道）
+        self._youku_client_id = ""
         self._use_tmdb = True
         self._tmdb_key = ""
         self._kdocs_enabled = True
@@ -1569,6 +1703,7 @@ class StreamingNewAlert(_PluginBase):
             self._notify_title = str(config.get("notify_title") or "🎬 影视平台上新提醒").strip()
             self._api_base = str(config.get("api_base") or "").strip()
             self._api_token = str(config.get("api_token") or "").strip()
+            self._youku_client_id = str(config.get("youku_client_id") or "").strip()
             # TMDB：默认开启，Key 留空则自动复用 MoviePilot 系统设置里的 TMDB API Key
             self._use_tmdb = bool(config.get("use_tmdb", True))
             self._tmdb_key = _TmdbSource.resolve_api_key(config.get("tmdb_api_key") or "")
@@ -1782,6 +1917,23 @@ class StreamingNewAlert(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "youku_client_id",
+                                        "label": "优酷开放平台 Client ID（可选）",
+                                        "placeholder": "留空则优酷仅走 TMDB 通道",
+                                        "hint": "优酷旧分类页已下线，需到 doc.open.youku.com 申请；"
+                                                "未填写时优酷依赖 TMDB 提供数据",
+                                        "persistent-hint": True,
+                                    },
+                                }]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
                             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                                 {
                                     "component": "VSwitch",
@@ -1827,6 +1979,7 @@ class StreamingNewAlert(_PluginBase):
             "notify_title": "🎬 影视平台上新提醒",
             "api_base": "",
             "api_token": "",
+            "youku_client_id": "",
             "use_tmdb": True,
             "tmdb_api_key": "",
             "kdocs_enabled": True,
@@ -1992,6 +2145,7 @@ class StreamingNewAlert(_PluginBase):
                         api_token=self._api_token,
                         tmdb_key=self._tmdb_key if self._use_tmdb else "",
                         days=self._days,
+                        extra=self._plugin_extra(),
                     )
                     counts[CONTENT_TYPES[mtype]] = len(items)
                 except Exception as err:
@@ -2020,6 +2174,10 @@ class StreamingNewAlert(_PluginBase):
             return {"success": False, "message": "插件未初始化"}
         total = self._history.clear()
         return {"success": True, "message": f"已清空 {total} 条去重记录"}
+
+    def _plugin_extra(self) -> Dict[str, Any]:
+        """传给抓取器的平台专属附加配置。"""
+        return {"youku_client_id": self._youku_client_id}
 
     # ---------------------------- 事件处理 ----------------------------
 
@@ -2100,11 +2258,20 @@ class StreamingNewAlert(_PluginBase):
                             api_token=self._api_token,
                             tmdb_key=self._tmdb_key if self._use_tmdb else "",
                             days=self._days,
+                            extra=self._plugin_extra(),
                         )
                     )
 
                 summary["platforms"][platform_label] = {"候选": len(platform_candidates)}
                 summary["candidates"] += len(platform_candidates)
+
+                if not platform_candidates:
+                    # 静默返回 0 条最难排查（优酷就是这么悄悄失效的），这里强制留痕
+                    logger.warn(
+                        f"[影视上新] {platform_label} 本次未抓到任何候选，"
+                        f"数据源可能已失效或网络不可达，建议执行自检确认"
+                    )
+                    summary["platforms"][platform_label]["告警"] = "未抓到候选，数据源可能失效"
 
                 kept: List[_MediaItem] = []
                 for item in platform_candidates:
