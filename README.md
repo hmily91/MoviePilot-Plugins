@@ -7,7 +7,7 @@ MoviePilot V3 第三方插件仓库。
 | 插件 | 说明 | 版本 |
 |------|------|------|
 | [影视平台上新提醒](plugins.v3/streamingnewalert/) | 监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，按平台分组推送提醒，永久去重 | 1.2.1 |
-| [MJJSpeed站点自动签到](plugins.v3/mjjspeed_checkin/) | MJJSpeed 系列站点账号密码自动登录 + 每日自动签到，支持自定义域名，无需手工抓取 Cookie | 1.0.0 |
+| [MJJSpeed站点自动签到](plugins.v3/mjjspeed_checkin/) | MJJSpeed 系列站点账号密码自动登录 + 每日自动签到，支持自定义域名，无需手工抓取 Cookie，签到时间支持 Cron 表达式 | 1.2.0 |
 
 ## 使用方式
 
