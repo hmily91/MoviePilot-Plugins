@@ -41,7 +41,7 @@ class mjjspeed_checkin(_PluginBase):
     # 插件图标（仓库中的图标文件名）
     plugin_icon = "mjjspeed-v2.png"
     # 插件版本，需与 package.v3.json 中的 version 保持一致
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     # 插件分类
     plugin_label = "工具"
     # 插件作者
