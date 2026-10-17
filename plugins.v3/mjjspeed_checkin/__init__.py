@@ -38,7 +38,7 @@ class mjjspeed_checkin(_PluginBase):
     # 插件图标（仓库中的图标文件名）
     plugin_icon = "mjjspeed.png"
     # 插件版本，需与 package.v3.json 中的 version 保持一致
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     # 插件分类
     plugin_label = "工具"
     # 插件作者
@@ -63,10 +63,10 @@ class mjjspeed_checkin(_PluginBase):
         "1.mjjcloud.top\n"
         "mjjspeed.us"
     )
-    # 默认登录账号
-    DEFAULT_EMAIL: str = "1970238@qq.com"
-    # 默认登录密码
-    DEFAULT_PASSWORD: str = "q8484147"
+    # 默认登录账号（默认留空，避免泄露，请在配置中填写）
+    DEFAULT_EMAIL: str = ""
+    # 默认登录密码（默认留空，避免泄露，请在配置中填写）
+    DEFAULT_PASSWORD: str = ""
     # 默认签到时间（每日）
     DEFAULT_CHECKIN_TIME: str = "01:00"
     # 默认登录接口路径
@@ -232,14 +232,25 @@ class mjjspeed_checkin(_PluginBase):
                         ]
                     },
                     {
-                        "component": "VTextarea",
-                        "props": {
-                            "model": "sites",
-                            "label": "站点列表",
-                            "rows": 8,
-                            "placeholder": "每行一个站点地址，例如：3.mjjspeed.com",
-                            "hint": "每行一个站点地址，留空协议时自动补全 https://"
-                        }
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "sites",
+                                            "label": "站点列表",
+                                            "rows": 8,
+                                            "placeholder": "每行一个站点地址，例如：3.mjjspeed.com",
+                                            "hint": "每行一个站点地址，留空协议时自动补全 https://"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
                     },
                     {
                         "component": "VRow",
@@ -288,12 +299,23 @@ class mjjspeed_checkin(_PluginBase):
                         ]
                     },
                     {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "checkin_path",
-                            "label": "签到接口路径",
-                            "hint": "站点接口路径有差异时可在此调整"
-                        }
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "checkin_path",
+                                            "label": "签到接口路径",
+                                            "hint": "站点接口路径有差异时可在此调整"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
                     }
                 ]
             }
@@ -478,9 +500,14 @@ class mjjspeed_checkin(_PluginBase):
         url = self.__build_url(site, self._login_path)
         if not url:
             return None, "站点地址无效"
-        payload = {"email": self._email, "password": self._password}
+        # SSPanel 系站点登录为表单提交：email + passwd；同时附带 password 字段兼容部分变体
+        payload = {
+            "email": self._email,
+            "passwd": self._password,
+            "password": self._password,
+        }
         try:
-            res = self.__request_utils().post_res(url=url, json=payload)
+            res = self.__request_utils().post_res(url=url, data=payload)
         except Exception as err:
             return None, f"请求异常：{err}"
         if res is None:
@@ -489,8 +516,12 @@ class mjjspeed_checkin(_PluginBase):
             return None, f"站点返回 HTTP {res.status_code}"
         data = self.__safe_json(res)
         # 站点显式返回失败时，直接认定登录失败
-        if isinstance(data, dict) and data and not self.__is_success(data):
-            return None, self.__extract_message(data) or f"站点返回 HTTP {res.status_code}"
+        if isinstance(data, dict) and data:
+            if not self.__is_success(data):
+                return None, self.__extract_message(data) or f"站点返回 HTTP {res.status_code}"
+            # ret == 2 表示站点开启了两步验证
+            if str(data.get("ret")) == "2":
+                return None, "站点开启了两步验证（2FA），无法自动登录"
         cookies = dict(res.cookies.get_dict() or {})
         if not cookies:
             return None, "登录接口未返回会话信息，请检查接口路径"
@@ -542,7 +573,7 @@ class mjjspeed_checkin(_PluginBase):
         return RequestUtils(
             ua=self.USER_AGENT,
             cookies=cookies,
-            content_type="application/json; charset=UTF-8",
+            # SSPanel 系站点使用表单提交，保持默认表单编码即可
             accept_type="application/json, text/plain, */*",
             proxies=settings.PROXY,
             timeout=self.REQUEST_TIMEOUT
@@ -585,8 +616,8 @@ class mjjspeed_checkin(_PluginBase):
             "enabled": True,
             "notify": True,
             "sites": self.DEFAULT_SITES,
-            "email": self.DEFAULT_EMAIL,
-            "password": self.DEFAULT_PASSWORD,
+            "email": "",
+            "password": "",
             "checkin_time": self.DEFAULT_CHECKIN_TIME,
             "login_path": self.DEFAULT_LOGIN_PATH,
             "checkin_path": self.DEFAULT_CHECKIN_PATH,

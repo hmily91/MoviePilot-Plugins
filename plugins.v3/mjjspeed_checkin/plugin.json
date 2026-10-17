@@ -2,7 +2,7 @@
   "id": "mjjspeed_checkin",
   "name": "MJJSpeed站点自动签到",
   "description": "支持MJJSpeed系列站点账号密码自动登录+每日自动签到，支持自定义域名，无需手动获取Cookie。",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "icon": "mjjspeed.png",
   "author": "hmily",
   "author_url": "https://github.com/hmily91/MoviePilot-Plugins",
@@ -15,14 +15,15 @@
     "PluginAction"
   ],
   "history": {
+    "v1.1.0": "修复登录失败：SSPanel 系站点实际使用表单字段 email+passwd 提交（同时兼容 password 变体），识别两步验证（ret=2）；修复配置页字段重叠（全部字段统一包进 VRow/VCol 栅格）；默认账号密码改为留空，避免泄露。",
     "v1.0.0": "首次发布：多站点账号密码登录、每日定时签到、手动立即签到（命令 /mjjspeed_checkin 与插件 API）、结果通知、失败重试与异常日志记录。"
   },
   "config": {
     "enabled": true,
     "notify": true,
     "sites": "3.mjjspeed.com\ncn.mjjspeed.com\n2.mjjspeed.icu\n1.mjjspeed.top\n1.mjjclub.top\n1.mjjcloud.top\nmjjspeed.us",
-    "email": "1970238@qq.com",
-    "password": "q8484147",
+    "email": "",
+    "password": "",
     "checkin_time": "01:00",
     "login_path": "/auth/login",
     "checkin_path": "/user/checkin",
@@ -53,13 +54,13 @@
         "type": "string",
         "title": "登录账号",
         "description": "站点登录邮箱",
-        "default": "1970238@qq.com"
+        "default": ""
       },
       "password": {
         "type": "string",
         "title": "登录密码",
         "description": "站点登录密码，前端密文显示",
-        "default": "q8484147"
+        "default": ""
       },
       "checkin_time": {
         "type": "string",
