@@ -1,0 +1,96 @@
+{
+  "id": "mjjspeed_checkin",
+  "name": "MJJSpeed站点自动签到",
+  "description": "支持MJJSpeed系列站点账号密码自动登录+每日自动签到，支持自定义域名，无需手动获取Cookie。",
+  "version": "1.0.0",
+  "icon": "mjjspeed.png",
+  "author": "hmily",
+  "author_url": "https://github.com/hmily91/MoviePilot-Plugins",
+  "level": 1,
+  "labels": "工具",
+  "system_version": ">=3.0.0",
+  "v3": true,
+  "has_page": true,
+  "listen_events": [
+    "PluginAction"
+  ],
+  "history": {
+    "v1.0.0": "首次发布：多站点账号密码登录、每日定时签到、手动立即签到（命令 /mjjspeed_checkin 与插件 API）、结果通知、失败重试与异常日志记录。"
+  },
+  "config": {
+    "enabled": true,
+    "notify": true,
+    "sites": "3.mjjspeed.com\ncn.mjjspeed.com\n2.mjjspeed.icu\n1.mjjspeed.top\n1.mjjclub.top\n1.mjjcloud.top\nmjjspeed.us",
+    "email": "1970238@qq.com",
+    "password": "q8484147",
+    "checkin_time": "01:00",
+    "login_path": "/auth/login",
+    "checkin_path": "/user/checkin",
+    "retry": 3
+  },
+  "schema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "title": "启用插件",
+        "description": "关闭后不再执行定时签到与推送",
+        "default": true
+      },
+      "notify": {
+        "type": "boolean",
+        "title": "结果通知",
+        "description": "签到完成后通过系统通知推送结果，成功/失败都会提示",
+        "default": true
+      },
+      "sites": {
+        "type": "string",
+        "title": "站点列表",
+        "description": "每行一个站点地址，留空协议时自动补全 https://",
+        "default": "3.mjjspeed.com\ncn.mjjspeed.com\n2.mjjspeed.icu\n1.mjjspeed.top\n1.mjjclub.top\n1.mjjcloud.top\nmjjspeed.us"
+      },
+      "email": {
+        "type": "string",
+        "title": "登录账号",
+        "description": "站点登录邮箱",
+        "default": "1970238@qq.com"
+      },
+      "password": {
+        "type": "string",
+        "title": "登录密码",
+        "description": "站点登录密码，前端密文显示",
+        "default": "q8484147"
+      },
+      "checkin_time": {
+        "type": "string",
+        "title": "签到时间",
+        "description": "每日自动签到时间，格式 HH:MM",
+        "pattern": "^([01]?\\d|2[0-3]):([0-5]?\\d)$",
+        "default": "01:00"
+      },
+      "login_path": {
+        "type": "string",
+        "title": "登录接口路径",
+        "description": "登录接口相对路径，默认 /auth/login",
+        "default": "/auth/login"
+      },
+      "checkin_path": {
+        "type": "string",
+        "title": "签到接口路径",
+        "description": "签到接口相对路径，默认 /user/checkin",
+        "default": "/user/checkin"
+      },
+      "retry": {
+        "type": "integer",
+        "title": "失败重试次数",
+        "description": "签到失败后的重试次数，范围 1-10",
+        "minimum": 1,
+        "maximum": 10,
+        "default": 3
+      }
+    },
+    "required": [
+      "enabled"
+    ]
+  }
+}

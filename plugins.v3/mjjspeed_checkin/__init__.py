@@ -42,9 +42,9 @@ class mjjspeed_checkin(_PluginBase):
     # 插件分类
     plugin_label = "工具"
     # 插件作者
-    plugin_author = "hmily91"
+    plugin_author = "hmily"
     # 作者主页
-    author_url = "https://github.com/hmily91/moviepilot-mjjspeed-checkin"
+    author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     # 插件配置项ID前缀
     plugin_config_prefix = "mjjspeed_checkin_"
     # 加载顺序

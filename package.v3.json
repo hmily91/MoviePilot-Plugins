@@ -42,8 +42,9 @@
     "description": "支持MJJSpeed系列站点账号密码自动登录+每日自动签到，支持自定义域名，无需手动获取Cookie。",
     "labels": "工具",
     "version": "1.0.0",
+    "release": false,
     "icon": "mjjspeed.png",
-    "author": "hmily91",
+    "author": "hmily",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
