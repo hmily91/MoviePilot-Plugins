@@ -3,7 +3,7 @@
   "name": "股票AI分析助手",
   "description": "获取沪深A股实时行情与近5日K线，复用系统「智能助手」或自定义LLM接口进行技术面/短期走势/风险提示分析，并定时推送早盘预判与收盘报告。",
   "version": "1.1.5",
-  "icon": "stockai-v2.png",
+  "icon": "https://raw.githubusercontent.com/hmily91/MoviePilot-Plugins/main/stockai-v2.png",
   "author": "hmily",
   "author_url": "https://github.com/hmily91/MoviePilot-Plugins",
   "level": 1,
