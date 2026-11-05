@@ -104,7 +104,7 @@ class StockAi(_PluginBase):
     plugin_name = "股票AI分析助手"
     plugin_desc = "获取沪深A股行情，调用LLM进行技术面/走势/风险提示分析，并定时推送早盘预判与收盘报告；支持历史分析前端页面。"
     plugin_icon = "stockai-v2.png"
-    plugin_version = "1.1.5"
+    plugin_version = "1.1.6"
     plugin_author = "hmily"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "stockai_"      # 配置命名空间前缀
@@ -329,21 +329,21 @@ class StockAi(_PluginBase):
                             },
                              "text": "全部",
                              "events": {"click": {"api": "plugin/StockAi/set_filter",
-                                                  "method": "get", "params": {"mode": "all"}}}},
+                                                  "method": "get", "params": {"mode": "all", "kwargs": ""}}}},
                             {"component": "VBtn", "props": {
                                 "size": "small", "variant": "text", "class": "mr-1",
                                 "color": "primary" if mode_filter == "morning" else "default",
                             },
                              "text": "早盘预判",
                              "events": {"click": {"api": "plugin/StockAi/set_filter",
-                                                  "method": "get", "params": {"mode": "morning"}}}},
+                                                  "method": "get", "params": {"mode": "morning", "kwargs": ""}}}},
                             {"component": "VBtn", "props": {
                                 "size": "small", "variant": "text",
                                 "color": "primary" if mode_filter == "close" else "default",
                             },
                              "text": "收盘分析",
                              "events": {"click": {"api": "plugin/StockAi/set_filter",
-                                                  "method": "get", "params": {"mode": "close"}}}},
+                                                  "method": "get", "params": {"mode": "close", "kwargs": ""}}}},
                         ]},
                     ]},
                     {"component": "VRow", "content": [
@@ -352,14 +352,14 @@ class StockAi(_PluginBase):
                                 "color": "primary", "variant": "flat", "prepend-icon": "mdi-play",
                             },
                              "text": "立即分析",
-                             "events": {"click": {"api": "plugin/StockAi/run", "method": "post"}}},
+                             "events": {"click": {"api": "plugin/StockAi/run", "method": "post", "params": {"kwargs": ""}}}},
                         ]},
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VBtn", "props": {
                                 "color": "error", "variant": "outlined", "prepend-icon": "mdi-delete",
                             },
                              "text": "清空历史",
-                             "events": {"click": {"api": "plugin/StockAi/clear", "method": "post"}}},
+                             "events": {"click": {"api": "plugin/StockAi/clear", "method": "post", "params": {"kwargs": ""}}}},
                         ]},
                     ]},
                 ]},
@@ -452,16 +452,18 @@ class StockAi(_PluginBase):
             },
         ]
 
-    # ---- 4.1 API 端点实现（**kwargs 接收 query/body 参数，返回 JSON）----
-    def api_get_history(self, **kwargs: Any) -> Dict[str, Any]:
+    # ---- 4.1 API 端点实现 ----
+    # 注意：MoviePilot V3 会把 VAR_KEYWORD(**kwargs) 反射成名为 kwargs 的必填 query 参数，
+    # 导致所有插件 API 返回 422。这里改为显式可选参数，同时保留可选 kwargs 以兼容宿主传参。
+    def api_get_history(self, mode: str = "all", kwargs: Any = None) -> Dict[str, Any]:
         """GET /history：返回历史分析记录（按 mode 筛选）。"""
-        mode = (kwargs.get("mode") or "").strip()
+        mode = (mode or "").strip()
         history = self._load_history()
         if mode and mode != "all":
             history = [h for h in history if h.get("mode") == mode]
         return {"code": 0, "total": len(history), "data": history}
 
-    def api_run(self, **kwargs: Any) -> Dict[str, Any]:
+    def api_run(self, kwargs: Any = None) -> Dict[str, Any]:
         """POST /run：手动立即分析（不受休市跳过限制），并写入历史。"""
         try:
             self._manual_run()
@@ -470,7 +472,7 @@ class StockAi(_PluginBase):
             logger.error("手动立即分析异常：%s", traceback.format_exc())
             return {"code": 1, "message": "分析执行失败，详见日志"}
 
-    def api_clear(self, **kwargs: Any) -> Dict[str, Any]:
+    def api_clear(self, kwargs: Any = None) -> Dict[str, Any]:
         """POST /clear：清空历史分析记录。"""
         try:
             self.save_data("analysis_history", [])
@@ -479,9 +481,9 @@ class StockAi(_PluginBase):
             logger.error("清空历史记录异常：%s", traceback.format_exc())
             return {"code": 1, "message": "清空失败，详见日志"}
 
-    def api_set_filter(self, **kwargs: Any) -> Dict[str, Any]:
+    def api_set_filter(self, mode: str = "all", kwargs: Any = None) -> Dict[str, Any]:
         """GET /set_filter?mode=xxx：设置历史页筛选条件。"""
-        mode = (kwargs.get("mode") or "all").strip()
+        mode = (mode or "all").strip()
         if mode not in ("all", "morning", "close"):
             mode = "all"
         try:
