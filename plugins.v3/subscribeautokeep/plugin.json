@@ -1,0 +1,93 @@
+{
+  "id": "SubscribeAutoKeep",
+  "name": "订阅自动保种助手",
+  "description": "定时检索勾选站点的同季整季打包资源，按分辨率/正则/季集校验命中后延迟清理原生电视剧订阅及其种子、文件与转移记录，再下载整包以便 MP 正常转移刮削。",
+  "version": "3.0.0",
+  "icon": "Moviepilot_A.png",
+  "author": "hmily",
+  "author_url": "https://github.com/hmily91/MoviePilot-Plugins",
+  "level": 1,
+  "labels": "订阅,保种,整季打包,定时清理",
+  "system_version": ">=3.0.0",
+  "v3": true,
+  "has_page": true,
+  "listen_events": [],
+  "homepage": "https://github.com/hmily91/MoviePilot-Plugins/tree/main/plugins.v3/subscribeautokeep",
+  "history": {
+    "v3.0.0": "首次发布：V3 稳定 SDK 定时任务、宿主 MetaInfo 季集识别优先、真实 PT 站标题回归用例、删前稳定性等待与删后替换观察窗、分级清理与证据链、测试模式与正则校验。"
+  },
+  "config": {
+    "enabled": false,
+    "test_mode": true,
+    "cron": "0 4 * * *",
+    "sites": [],
+    "resolutions": ["2160p", "1080p"],
+    "delay_minutes": 15,
+    "replacement_delay_minutes": 10,
+    "replacement_window_minutes": 15,
+    "auto_download_replacement": true,
+    "include_rules": "any::Complete|Season\\s*\\d+|全集\nany::全\\s*\\d+\\s*集|整季|全季|合集|完结\nany::S\\d{1,2}\\s+Complete|Season\\s+Pack",
+    "exclude_rules": "any::Sample|预告|花絮|Trailer|Preview\nany::Part\\s*\\d+|Vol\\.?\\s*\\d+|前\\s*\\d+\\s*集\nany::第\\s*\\d+\\s*[-~至]?\\s*\\d*\\s*集|第\\s*\\d+\\s*[-~至]\\s*\\d+\\s*集",
+    "action_delete_subscribe": true,
+    "action_delete_torrent": true,
+    "action_delete_torrent_files": false,
+    "action_delete_local_files": false,
+    "action_delete_media_files": false,
+    "action_delete_history": true
+  },
+  "schema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "title": "启用插件",
+        "description": "开启后注册 Cron 扫描与队列复检服务。",
+        "default": false
+      },
+      "test_mode": {
+        "type": "boolean",
+        "title": "测试模式",
+        "description": "只打印日志并推送预警，不入队、不删除、不下载。默认开启，核对证据链后再关闭。",
+        "default": true
+      },
+      "cron": {
+        "type": "string",
+        "title": "Cron 定时表达式",
+        "description": "5 段标准 Cron：分 时 日 月 周，例如每天 04:00 为 0 4 * * *。",
+        "default": "0 4 * * *"
+      },
+      "sites": {
+        "type": "array",
+        "title": "监控站点",
+        "description": "站点 ID 列表，由 get_form() 从 SiteOper.list_active() 动态生成；留空表示不限制。",
+        "items": { "type": "integer" },
+        "default": []
+      },
+      "resolutions": {
+        "type": "array",
+        "title": "目标分辨率",
+        "description": "可选 2160p / 1080p / 720p / 480p，多选。",
+        "items": { "type": "string" },
+        "default": ["2160p", "1080p"]
+      },
+      "delay_minutes": {
+        "type": "integer",
+        "title": "删前稳定性等待（分钟）",
+        "description": "命中后持续复检打包种子是否仍可检索到，消失即取消清理。",
+        "default": 15
+      },
+      "replacement_delay_minutes": {
+        "type": "integer",
+        "title": "清理后延迟下载（分钟）",
+        "description": "旧资源清空后延迟多久把整季全集交给 MP 下载链，建议 10~15。",
+        "default": 10
+      },
+      "auto_download_replacement": {
+        "type": "boolean",
+        "title": "自动下载整季全集",
+        "description": "关闭则只推送标题/页面/下载链接，由用户手动下载。",
+        "default": true
+      }
+    }
+  }
+}
