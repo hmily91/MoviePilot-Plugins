@@ -162,7 +162,7 @@ requests = _safe_import(lambda: __import__("requests"))
 
 import urllib.error
 import urllib.request
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 
 # ============================================================================
@@ -230,6 +230,9 @@ DATE_KEYS: Tuple[str, ...] = (
     "publishDate", "onlineDate", "releaseDate", "firstPublishTime", "publishTime",
     "onlineTime", "releaseTime", "publishTimeStamp", "upDate", "updateTime", "showDate",
     "issueDate", "airDate", "launchDate", "date", "time", "datetime", "startTime",
+    # 下划线风格：TMDB 与部分开放平台使用
+    "release_date", "first_air_date", "online_date", "show_date", "air_date",
+    "published", "published_at", "publishedAt", "publish_at", "created_at",
 )
 
 # 常见年份字段
@@ -454,9 +457,13 @@ def http_request(
                     continue
             return raw.decode("utf-8", errors="ignore")
         except Exception as err:
-            # 代理配置异常时自动降级为直连，避免所有外部请求整体失败
-            if proxies and _is_proxy_error(err):
-                logger.warn(f"[影视上新] 系统代理不可用，本次及后续请求改为直连：{err}")
+            # 代理失败时自动降级为直连：TMDB 必须走代理，但部分国内站点
+            # （实测爱奇艺 pcw-api）经代理会 SSL 握手失败，直连反而 200。
+            # 每次调用都会重新构造 proxies，因此这里只影响本次请求链。
+            if proxies:
+                hint = "系统代理不可用" if _is_proxy_error(err) else \
+                       "经代理请求失败（目标站点可能不接受代理）"
+                logger.warn(f"[影视上新] {hint}，改用直连重试：{err}")
                 proxies = None
                 continue
             if attempt >= retries:
@@ -803,20 +810,41 @@ class _TmdbSource:
         "tv": {10764, 10767},
     }
 
+    # 国内网络直连 api.themoviedb.org 普遍超时（实测 http 000），
+    # 因此把可达镜像排在官方域名之前，逐个探测直到拿到数据
+    DOMAIN_FALLBACKS: Tuple[str, ...] = ("api.tmdb.org", "api.themoviedb.org")
+
     def __init__(self):
         self._provider_cache: Dict[str, Dict[str, Optional[int]]] = {}
         self._lock = threading.Lock()
+        # 上次请求成功的域名，后续请求直接复用，避免每次重新探测
+        self._working_domain: str = ""
+        # TMDB 是否仍提供中国大陆观看平台数据（None = 尚未探测）
+        self._cn_supported: Optional[bool] = None
 
     # ------------------------------------------------------------------ 基础
 
-    @staticmethod
-    def _base_url() -> str:
-        """TMDB API 根地址（优先使用 MoviePilot 系统设置里的镜像域名）。"""
-        domain = "api.themoviedb.org"
+    @classmethod
+    def _candidate_domains(cls) -> List[str]:
+        """按优先级返回待尝试的 API 域名（已去重）。
+
+        顺序：MoviePilot 系统设置的 TMDB_API_DOMAIN → 国内可达镜像 → 官方域名。
+        """
+        domains: List[str] = []
+        configured = ""
         if settings is not None:
-            domain = str(getattr(settings, "TMDB_API_DOMAIN", "") or domain).strip() or domain
-        domain = domain.replace("https://", "").replace("http://", "").rstrip("/")
-        return f"https://{domain}/3"
+            configured = str(getattr(settings, "TMDB_API_DOMAIN", "") or "").strip()
+        for raw in (configured, *cls.DOMAIN_FALLBACKS):
+            domain = raw.replace("https://", "").replace("http://", "").strip().rstrip("/")
+            if domain and domain not in domains:
+                domains.append(domain)
+        return domains
+
+    def _base_url(self) -> str:
+        """当前可用的 API 根地址：优先复用上次成功的域名。"""
+        if self._working_domain:
+            return f"https://{self._working_domain}/3"
+        return f"https://{self._candidate_domains()[0]}/3"
 
     @staticmethod
     def resolve_api_key(config_key: str = "") -> str:
@@ -832,6 +860,56 @@ class _TmdbSource:
             return str(getattr(settings, "TMDB_API_KEY", "") or "").strip()
         return ""
 
+    # ------------------------------------------------------- 中国大陆可用性
+
+    def check_cn_region(self, api_key: str) -> bool:
+        """
+        探测 TMDB 是否仍然提供中国大陆（CN）的观看平台数据。
+
+        实测结论（2026-10）：TMDB 的 /watch/providers/regions 已不再包含 CN，
+        且带 watch_region=CN 查询观看平台列表会直接返回空数组 —— 即 TMDB
+        已下线中国大陆的观看平台数据（其数据提供方 JustWatch 退出中国市场）。
+
+        该方法只探测一次并缓存结果，用于把「数据源下线」与「网络故障 / Key 失效」
+        区分开，避免把两者都笼统记成「请求失败」而误导排查方向。
+
+        :param api_key: TMDB API Key
+        :return: True 表示 CN 仍在支持地区列表内
+        """
+        if self._cn_supported is not None:
+            return self._cn_supported
+        if not api_key:
+            return False
+
+        for domain in self._candidate_domains():
+            url = f"https://{domain}/3/watch/providers/regions?api_key={api_key}"
+            try:
+                data = load_json_or_none(http_request(url, headers=build_headers(),
+                                                      timeout=15, retries=1) or "")
+            except Exception as err:  # noqa: BLE001
+                logger.warn(f"[影视上新] TMDB 地区列表请求失败（{domain}）：{err}")
+                continue
+            regions = (data or {}).get("results") or []
+            if not regions:
+                continue
+            supported = any(
+                str(r.get("iso_3166_1") or "").upper() == self.REGION for r in regions
+            )
+            self._cn_supported = supported
+            if supported:
+                logger.info(f"[影视上新] TMDB 观看平台支持地区包含 {self.REGION}（{domain}）")
+            else:
+                logger.warn(
+                    f"[影视上新] TMDB 已不支持 {self.REGION} 地区（共 {len(regions)} 个地区，"
+                    f"不含 {self.REGION}）。其中国大陆观看平台数据已下线（数据方 JustWatch 退出中国），"
+                    f"爱奇艺 / 优酷 / 腾讯视频均无法通过 TMDB 观看平台接口查询，"
+                    f"本插件将完全依赖各平台直抓数据源。这不是网络或 API Key 问题，无需排查代理。"
+                )
+            return supported
+
+        # 全部域名都拿不到地区列表：无法判定，按「仍支持」处理，交由后续查询自然失败
+        return True
+
     # ------------------------------------------------------------------ 平台ID
 
     def _provider_id(self, kind: str, platform_key: str, api_key: str) -> Optional[int]:
@@ -841,19 +919,44 @@ class _TmdbSource:
             cached = self._provider_cache.get(cache_key)
         if cached is None:
             cached = self._load_providers(kind, api_key)
-            with self._lock:
-                self._provider_cache[cache_key] = cached
+            # 只有解析到至少一个平台才写入缓存；
+            # 否则一次网络抖动会把「全 null」永久缓存，后续任务不再重试
+            if any(cached.values()):
+                with self._lock:
+                    self._provider_cache[cache_key] = cached
         return cached.get(platform_key)
 
     def _load_providers(self, kind: str, api_key: str) -> Dict[str, Optional[int]]:
         """拉取 watch providers 列表并按别名匹配三大平台。"""
         result: Dict[str, Optional[int]] = {key: None for key in self.PROVIDER_ALIASES}
-        url = f"{self._base_url()}/watch/providers/{kind}" \
-              f"?api_key={api_key}&watch_region={self.REGION}"
-        try:
-            text = http_request(url, headers=build_headers())
-            data = load_json_or_none(text or "")
-            for provider in (data or {}).get("results", []):
+        if not api_key:
+            logger.error("[影视上新] TMDB API Key 为空，无法查询观看平台，"
+                         "请在 MoviePilot 系统设置或插件配置中填写 TMDB API Key")
+            return result
+
+        last_error = ""
+        for domain in self._candidate_domains():
+            # 注意：这里不能带 watch_region=CN。
+            # 实测带该参数时接口直接返回 {"results":[]}（CN 已从支持地区移除），
+            # 不带则返回全球全部 provider（约 820 个）再自行按名称匹配。
+            url = f"https://{domain}/3/watch/providers/{kind}?api_key={api_key}"
+            data: Optional[Dict[str, Any]] = None
+            try:
+                text = http_request(url, headers=build_headers(), timeout=15, retries=1)
+                data = load_json_or_none(text or "")
+            except Exception as err:
+                last_error = f"{domain} 请求异常：{err}"
+                logger.warn(f"[影视上新] TMDB 观看平台列表请求失败（{domain}）：{err}")
+                continue
+
+            providers = (data or {}).get("results") or []
+            if not providers:
+                last_error = str((data or {}).get("status_message") or "返回空列表")
+                logger.warn(f"[影视上新] TMDB 观看平台列表为空（{domain}）：{last_error}"
+                            f"（多为 API Key 无效，或该地区数据已下线）")
+                continue
+
+            for provider in providers:
                 name = str(provider.get("provider_name") or "").lower()
                 for key, aliases in self.PROVIDER_ALIASES.items():
                     if result.get(key):
@@ -862,9 +965,20 @@ class _TmdbSource:
                         if alias in name:
                             result[key] = provider.get("provider_id")
                             break
-        except Exception as err:
-            logger.warn(f"[影视上新] TMDB 观看平台列表获取失败：{err}")
-        logger.debug(f"[影视上新] TMDB provider 解析结果：{result}")
+
+            self._working_domain = domain
+            if all(result.get(key) for key in self.PROVIDER_ALIASES):
+                logger.info(f"[影视上新] TMDB 观看平台解析成功（{domain}）：{result}")
+            else:
+                sample = "、".join(
+                    str(p.get("provider_name")) for p in providers[:30]
+                )
+                logger.warn(f"[影视上新] TMDB 观看平台部分未匹配（{domain}）：{result}；"
+                            f"返回列表前 30 个：{sample}")
+            return result
+
+        logger.error(f"[影视上新] TMDB 观看平台列表在所有域名下均失败，"
+                     f"最后错误：{last_error}；已尝试域名：{self._candidate_domains()}")
         return result
 
     # ------------------------------------------------------------------ 查询
@@ -887,6 +1001,18 @@ class _TmdbSource:
         :param api_key: TMDB API Key
         """
         kind = "movie" if mtype == "movie" else "tv"
+
+        # TMDB 已下线 CN 观看平台数据：此时即便解析到 provider_id，
+        # discover 带 watch_region=CN 也必然返回 0 条（实测 total_results=0），
+        # 不带 watch_region 又会让 with_watch_providers 被忽略（返回全球全量）。
+        # 因此直接短路，避免每平台每类型白跑两次请求。
+        if not self.check_cn_region(api_key):
+            logger.info(
+                f"[影视上新] TMDB 无 {self.REGION} 地区观看平台数据，"
+                f"{platform_label} 跳过 TMDB 查询，改用平台直抓数据源"
+            )
+            return []
+
         provider_id = self._provider_id(kind, platform_key, api_key)
         if not provider_id:
             logger.warn(
@@ -960,6 +1086,164 @@ def get_tmdb_source() -> _TmdbSource:
         return _TMDB_SOURCE
 
 
+# ============================================================================
+# 六·二、上线日期核验闸门（保证推送的是「近期真实上线」，而非热度榜老剧）
+# ============================================================================
+
+
+class _ReleaseVerifier:
+    """
+    用 TMDB 精确同名记录核对每条候选的真实首播 / 上映日期。
+
+    背景：三大平台公开榜单是「热度榜」而非「上新榜」，不返回上线日期，
+    且会把多年前的老剧、演员名、导航文字混进候选。旧版在宽松日期模式下
+    对无日期条目一律放行，实测 2026-11 的 39 条推送中仅约 15% 是近 7 天上新。
+
+    本类作为统一闸门：
+      - TMDB 查不到精确同名的电影 / 剧集记录 -> 丢弃（演员名、广告、导航行、未收录微短剧）
+      - 没有 first_air_date / release_date -> 丢弃（无法确认上线时间）
+      - 日期在未来 -> 丢弃（仅定档、尚未上线）
+      - 日期早于「近 N 天」 -> 丢弃（老剧）
+      - 通过后回填真实日期与年份，推送文案即可显示上线时间
+
+    查询结果按标题缓存 7 天，避免每天重复请求 TMDB。
+    """
+
+    CACHE_FILE = "tmdb_release_cache.json"
+    CACHE_TTL_SECONDS = 7 * 86400
+
+    def __init__(self, api_key: str, days: int, data_path: Optional[Path] = None):
+        self._api_key = (api_key or "").strip()
+        self._days = max(1, int(days or 7))
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._cache_path: Optional[Path] = (
+            Path(data_path) / self.CACHE_FILE if data_path else None
+        )
+        self._lock = threading.Lock()
+        self.stats: Dict[str, int] = {
+            "核验": 0, "通过": 0, "无同名作品": 0, "无上线日期": 0,
+            "仅定档未上线": 0, "非近期上线": 0, "查询失败": 0,
+        }
+        self._load_cache()
+
+    def _load_cache(self) -> None:
+        if not self._cache_path or not self._cache_path.exists():
+            return
+        try:
+            data = json.loads(self._cache_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                self._cache = {k: v for k, v in data.items() if isinstance(v, dict)}
+        except Exception as err:
+            logger.debug(f"[影视上新] 上线日期缓存读取失败：{err}")
+
+    def _save_cache(self) -> None:
+        if not self._cache_path:
+            return
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cache_path.write_text(
+                json.dumps(self._cache, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+        except Exception as err:
+            logger.debug(f"[影视上新] 上线日期缓存写入失败：{err}")
+
+    @staticmethod
+    def _cache_fresh(info: Dict[str, Any]) -> bool:
+        try:
+            ts = float(info.get("ts") or 0)
+        except (TypeError, ValueError):
+            return False
+        return ts > 0 and (time.time() - ts) < _ReleaseVerifier.CACHE_TTL_SECONDS
+
+    def _lookup(self, name: str) -> Dict[str, Any]:
+        """查 TMDB，返回 {date, name, type, ts}；无精确同名时 date 为空。"""
+        empty: Dict[str, Any] = {"date": "", "name": "", "type": "", "ts": time.time()}
+        if not self._api_key:
+            return empty
+        wanted = normalize_name(name)
+        for domain in _TmdbSource._candidate_domains():
+            url = (
+                f"https://{domain}/3/search/multi?api_key={self._api_key}"
+                f"&language=zh-CN&query={quote(name)}&page=1"
+            )
+            try:
+                text = http_request(url, timeout=20, retries=1)
+                data = load_json_or_none(text or "") or {}
+                rows = [
+                    x for x in (data.get("results") or [])
+                    if isinstance(x, dict) and x.get("media_type") in ("movie", "tv")
+                ]
+                exact = [
+                    x for x in rows
+                    if normalize_name(x.get("name") or x.get("title") or "") == wanted
+                ]
+                if not exact:
+                    # 域名可达但无精确同名：换域名结果相同，无需再试
+                    return empty
+                hit = exact[0]
+                return {
+                    "date": hit.get("first_air_date") or hit.get("release_date") or "",
+                    "name": hit.get("name") or hit.get("title") or "",
+                    "type": hit.get("media_type") or "",
+                    "ts": time.time(),
+                }
+            except Exception as err:
+                logger.debug(f"[影视上新] TMDB 日期核验失败（{domain}）：{err}")
+                continue
+        self.stats["查询失败"] += 1
+        return empty
+
+    def verify(self, item: _MediaItem) -> Tuple[bool, str]:
+        """核验单条候选；通过时回填 online_date / year。"""
+        self.stats["核验"] += 1
+        if not self._api_key:
+            self.stats["查询失败"] += 1
+            return False, "未配置 TMDB API Key，无法核对上线日期"
+
+        key = normalize_name(item.name)
+        if not key:
+            self.stats["无同名作品"] += 1
+            return False, "标题为空"
+
+        with self._lock:
+            info = self._cache.get(key)
+            fresh = bool(info) and self._cache_fresh(info)
+        if not fresh:
+            info = self._lookup(item.name)
+            with self._lock:
+                self._cache[key] = info
+                self._save_cache()
+
+        date_text = str(info.get("date") or "")
+        matched_name = str(info.get("name") or "")
+        if not date_text or not matched_name or normalize_name(matched_name) != key:
+            self.stats["无同名作品"] += 1
+            return False, "TMDB 无精确同名影视作品（疑似演员名/广告/未收录）"
+
+        try:
+            release = datetime.strptime(date_text, "%Y-%m-%d").date()
+        except ValueError:
+            self.stats["无上线日期"] += 1
+            return False, f"上线日期格式异常：{date_text}"
+
+        today = datetime.now().date()
+        if release > today:
+            self.stats["仅定档未上线"] += 1
+            return False, f"仅定档未上线（{date_text}）"
+        age = (today - release).days
+        if age > self._days:
+            self.stats["非近期上线"] += 1
+            return False, f"非近期上线（首播 {date_text}，距今 {age} 天）"
+
+        # 通过：回填真实日期与年份，推送文案会显示上线时间
+        item.online_date = date_text
+        item.year = date_text[:4]
+        item.extra["tmdb_release_date"] = date_text
+        item.extra["tmdb_media_type"] = str(info.get("type") or "")
+        self.stats["通过"] += 1
+        return True, ""
+
+
 class _PlatformFetcher:
     """
     平台抓取器基类。
@@ -981,6 +1265,7 @@ class _PlatformFetcher:
         api_token: str = "",
         tmdb_key: str = "",
         days: int = 7,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> List[_MediaItem]:
         """
         抓取指定内容类型的新上线内容。
@@ -995,6 +1280,7 @@ class _PlatformFetcher:
         :param api_token: 自定义 API 的 Bearer Token（可选）
         :param tmdb_key: TMDB API Key，为空表示不使用 TMDB
         :param days: 只取近 N 天内上线的内容
+        :param extra: 平台专属的附加配置（如优酷开放平台的 client_id）
         """
         items: List[_MediaItem] = []
 
@@ -1164,10 +1450,20 @@ class _IQiyiFetcher(_PlatformFetcher):
 
 
 class _YoukuFetcher(_PlatformFetcher):
-    """优酷数据源。"""
+    """优酷数据源。
+
+    优酷旧分类页（/category/show/c_96|c_97*.html）已整体下线：实测全部 301/302
+    跳转到 /ku/webhome 首页，且内容为前端渲染，HTML 抓取通道不再产出任何数据。
+    因此这里补充「优酷开放平台 v2」通道，需用户自行申请 client_id 后填到插件配置。
+    未配置 client_id 时，优酷仍可走 TMDB 通道（TMDB 上有 Youku 观看平台）。
+    """
 
     platform_key = "youku"
     platform_label = "优酷"
+
+    # 优酷开放平台 v2：实测端点存活，缺少 client_id 时返回 code 1004
+    OPENAPI_URL = "https://openapi.youku.com/v2/shows/by_category.json"
+    OPENAPI_CATEGORIES = {"movie": "电影", "tv": "电视剧"}
 
     ENDPOINTS = {
         "movie": [
@@ -1199,6 +1495,70 @@ class _YoukuFetcher(_PlatformFetcher):
             },
         ],
     }
+
+    def fetch(
+        self,
+        mtype: str,
+        api_base: str = "",
+        api_token: str = "",
+        tmdb_key: str = "",
+        days: int = 7,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> List[_MediaItem]:
+        """先走通用通道（TMDB / 自定义 API / 旧 HTML），再尝试开放平台。"""
+        items = super().fetch(
+            mtype=mtype, api_base=api_base, api_token=api_token,
+            tmdb_key=tmdb_key, days=days, extra=extra,
+        )
+        if items:
+            return items
+
+        client_id = str((extra or {}).get("youku_client_id") or "").strip()
+        if not client_id:
+            logger.warn("[影视上新] 优酷未配置开放平台 client_id，且通用通道无数据，"
+                        "本次无候选（可在插件配置中填写 youku_client_id 恢复优酷）")
+            return []
+
+        items = self._fetch_openapi(mtype, client_id)
+        if items:
+            logger.info(f"[影视上新] 优酷·{CONTENT_TYPES.get(mtype)} "
+                        f"开放平台返回 {len(items)} 条候选")
+        return items
+
+    def _fetch_openapi(self, mtype: str, client_id: str) -> List[_MediaItem]:
+        """通过优酷开放平台 v2 按分类拉取节目列表。"""
+        category = self.OPENAPI_CATEGORIES.get(mtype, "")
+        if not category:
+            return []
+        params = {
+            "client_id": client_id,
+            "category": category,
+            "page": 1,
+            "count": 50,
+            "orderby": "published",
+        }
+        url = f"{self.OPENAPI_URL}?{urlencode(params)}"
+        try:
+            text = http_request(url, headers=build_headers("https://www.youku.com/"))
+            data = load_json_or_none(text or "")
+        except Exception as err:
+            logger.warn(f"[影视上新] 优酷开放平台请求失败：{err}")
+            return []
+        if not isinstance(data, dict):
+            return []
+        if data.get("error"):
+            logger.warn(f"[影视上新] 优酷开放平台返回错误：{data.get('error')}")
+            return []
+
+        raw_items = data.get("shows") or data.get("videos") or []
+        items: List[_MediaItem] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            item = self._to_media_item(raw, mtype)
+            if item:
+                items.append(item)
+        return items
 
 
 class _TencentFetcher(_PlatformFetcher):
@@ -1542,11 +1902,17 @@ class StreamingNewAlert(_PluginBase):
         self._notify_title = "🎬 影视平台上新提醒"
         self._api_base = ""
         self._api_token = ""
+        # 优酷开放平台 client_id（用户自行申请，留空则优酷仅走 TMDB 通道）
+        self._youku_client_id = ""
         self._use_tmdb = True
         self._tmdb_key = ""
         self._kdocs_enabled = True
         self._kdocs_data_url = ""
         self._strict_dates = False
+        # 1.3.0：强制用 TMDB 核对真实上线日期（老剧/仅定档/无日期一律不推）
+        self._verify_release = True
+        # 云盘资源不保证「可在视频平台播放」，默认不纳入上新推送
+        self._allow_cloud = False
         self._onlyonce = False
         self._history: Optional[_PushHistory] = None
         self._timer: Optional[threading.Timer] = None
@@ -1569,6 +1935,7 @@ class StreamingNewAlert(_PluginBase):
             self._notify_title = str(config.get("notify_title") or "🎬 影视平台上新提醒").strip()
             self._api_base = str(config.get("api_base") or "").strip()
             self._api_token = str(config.get("api_token") or "").strip()
+            self._youku_client_id = str(config.get("youku_client_id") or "").strip()
             # TMDB：默认开启，Key 留空则自动复用 MoviePilot 系统设置里的 TMDB API Key
             self._use_tmdb = bool(config.get("use_tmdb", True))
             self._tmdb_key = _TmdbSource.resolve_api_key(config.get("tmdb_api_key") or "")
@@ -1576,7 +1943,10 @@ class StreamingNewAlert(_PluginBase):
             self._kdocs_enabled = bool(config.get("kdocs_enabled", True))
             self._kdocs_data_url = str(config.get("kdocs_data_url") or "").strip()
             # strict / loose：拿不到上线日期时是否仍然推送
-            self._strict_dates = str(config.get("date_mode") or "loose").lower() == "strict"
+            self._strict_dates = str(config.get("date_mode") or "strict").lower() == "strict"
+            # 1.3.0 上线日期核验：老配置没有这两个键，默认开启核验、默认不推云盘源
+            self._verify_release = bool(config.get("verify_release", True))
+            self._allow_cloud = bool(config.get("allow_cloud", False))
             self._onlyonce = bool(config.get("onlyonce"))
             self._last_result = str(config.get("last_result") or "")
 
@@ -1592,8 +1962,12 @@ class StreamingNewAlert(_PluginBase):
                 f"[影视上新] 插件已启用：平台={self._enabled_platforms()} "
                 f"类型={self._enabled_types()} 时间={self._cron} 范围={self._days} 天 "
                 f"TMDB={'已启用' if (self._use_tmdb and self._tmdb_key) else '未启用'} "
-                f"云盘={'已启用' if self._kdocs_enabled else '未启用'}"
+                f"云盘={'已启用' if self._kdocs_enabled else '未启用'} "
+                f"上线日期核验={'开启' if (self._verify_release and self._tmdb_key) else '关闭'}"
             )
+            if self._verify_release and not self._tmdb_key:
+                logger.warn("[影视上新] 已开启上线日期核验但未取到 TMDB API Key，"
+                            "请在系统设置或插件配置中填入，否则本次不会推送任何内容")
 
             # 配置页勾选「立即执行一次」：交给宿主调度器延迟 3 秒执行，避免阻塞保存流程
             if self._onlyonce:
@@ -1696,10 +2070,35 @@ class StreamingNewAlert(_PluginBase):
                                         "model": "date_mode",
                                         "label": "日期策略",
                                         "items": [
-                                            {"title": "宽松：平台未公开日期时按本次首见推送", "value": "loose"},
-                                            {"title": "严格：必须解析到近 N 天上线日期才推送", "value": "strict"},
+                                            {"title": "严格：必须有近 N 天上线日期才推送（推荐）", "value": "strict"},
+                                            {"title": "宽松：日期缺失时按本次首见推送（可能推老剧）", "value": "loose"},
                                         ],
-                                        "hint": "三大平台公开接口多数不返回上线日期，严格模式可能导致无内容可推",
+                                        "hint": "开启「上线日期核验」后日期由 TMDB 补全，本项仅影响极少数漏网条目",
+                                        "persistent-hint": True,
+                                    },
+                                }]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {
+                                    "component": "VSwitch",
+                                    "props": {
+                                        "model": "verify_release",
+                                        "label": "上线日期核验（推荐开启）",
+                                        "hint": "用 TMDB 精确同名记录核对首播/上映日期：老剧、仅定档、无日期、演员名一律不推，并把真实上线日期写进通知",
+                                        "persistent-hint": True,
+                                    },
+                                }]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {
+                                    "component": "VSwitch",
+                                    "props": {
+                                        "model": "allow_cloud",
+                                        "label": "推送云盘资源条目",
+                                        "hint": "云盘快照不保证可在视频平台播放，关闭时仅推送三大平台内容",
                                         "persistent-hint": True,
                                     },
                                 }]},
@@ -1782,13 +2181,30 @@ class StreamingNewAlert(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "youku_client_id",
+                                        "label": "优酷开放平台 Client ID（可选）",
+                                        "placeholder": "留空则优酷仅走 TMDB 通道",
+                                        "hint": "优酷旧分类页已下线，需到 doc.open.youku.com 申请；"
+                                                "未填写时优酷依赖 TMDB 提供数据",
+                                        "persistent-hint": True,
+                                    },
+                                }]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
                             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                                 {
                                     "component": "VSwitch",
                                     "props": {
                                         "model": "kdocs_enabled",
                                         "label": "云盘资源上新（金山文档）",
-                                        "hint": "拉取金山文档每日更新的云盘影视快照，随每日检查一并推送",
+                                        "hint": "拉取金山文档每日云盘快照；需同时开启「推送云盘资源条目」才会推送（默认关闭，因其不保证平台可播放）",
                                         "persistent-hint": True,
                                     },
                                 }]},
@@ -1827,11 +2243,14 @@ class StreamingNewAlert(_PluginBase):
             "notify_title": "🎬 影视平台上新提醒",
             "api_base": "",
             "api_token": "",
+            "youku_client_id": "",
             "use_tmdb": True,
             "tmdb_api_key": "",
             "kdocs_enabled": True,
             "kdocs_data_url": "",
-            "date_mode": "loose",
+            "date_mode": "strict",
+            "verify_release": True,
+            "allow_cloud": False,
         }
 
     def get_page(self) -> List[dict]:
@@ -1992,6 +2411,7 @@ class StreamingNewAlert(_PluginBase):
                         api_token=self._api_token,
                         tmdb_key=self._tmdb_key if self._use_tmdb else "",
                         days=self._days,
+                        extra=self._plugin_extra(),
                     )
                     counts[CONTENT_TYPES[mtype]] = len(items)
                 except Exception as err:
@@ -2011,7 +2431,39 @@ class StreamingNewAlert(_PluginBase):
                     providers[kind] = tmdb._load_providers(kind, tmdb_key)
                 except Exception as err:
                     providers[kind] = f"失败：{err}"
+            try:
+                cn_ok = tmdb.check_cn_region(tmdb_key)
+            except Exception as err:  # noqa: BLE001
+                cn_ok = f"失败：{err}"
             report["TMDB"] = providers
+            report["TMDB_CN地区可用"] = cn_ok
+            if cn_ok is False:
+                report["TMDB_说明"] = (
+                    "TMDB 已下线中国大陆观看平台数据，优酷/腾讯/爱奇艺均无法通过 TMDB 查询，"
+                    "本插件已改用各平台直抓数据源（非网络故障，无需排查代理）"
+                )
+
+        # 1.3.0 上线日期核验自检：用一个确定的老剧样本验证闸门确实在拦截
+        report["上线日期核验"] = {
+            "已启用": bool(self._verify_release),
+            "TMDB_Key": "已配置" if tmdb_key else "未配置",
+            "时间范围": f"近 {self._days} 天",
+            "云盘条目": "推送" if self._allow_cloud else "不推送",
+        }
+        if self._verify_release and tmdb_key:
+            try:
+                probe = _MediaItem(
+                    platform="iqiyi", platform_label="爱奇艺", mtype="tv",
+                    mtype_label="电视剧", name="开端", year="", online_date="",
+                )
+                ok, reason = _ReleaseVerifier(
+                    tmdb_key, self._days, self.get_data_path()
+                ).verify(probe)
+                report["上线日期核验"]["老剧样本"] = (
+                    f"错误放行（请检查）" if ok else f"已拦截：{reason}"
+                )
+            except Exception as err:
+                report["上线日期核验"]["老剧样本"] = f"自检失败：{err}"
         return {"success": True, "data": report}
 
     def api_clear(self) -> Dict[str, Any]:
@@ -2020,6 +2472,10 @@ class StreamingNewAlert(_PluginBase):
             return {"success": False, "message": "插件未初始化"}
         total = self._history.clear()
         return {"success": True, "message": f"已清空 {total} 条去重记录"}
+
+    def _plugin_extra(self) -> Dict[str, Any]:
+        """传给抓取器的平台专属附加配置。"""
+        return {"youku_client_id": self._youku_client_id}
 
     # ---------------------------- 事件处理 ----------------------------
 
@@ -2041,7 +2497,10 @@ class StreamingNewAlert(_PluginBase):
 
     def check_now(self) -> Dict[str, Any]:
         """
-        执行一次完整检查：抓取 -> 过滤 -> 去重 -> 推送。
+        执行一次完整检查：抓取 -> 上线日期核验 -> 过滤 -> 去重 -> 推送。
+
+        1.3.0 起默认对所有候选做 TMDB 上线日期核验，确保推送的是
+        「近期真实上线、且可在平台播放」的内容，而不是热度榜老剧。
 
         :return: 运行统计字典
         """
@@ -2069,6 +2528,19 @@ class StreamingNewAlert(_PluginBase):
             enable_tv=self._types.get("tv", True),
             strict_dates=self._strict_dates,
         )
+
+        # 1.3.0 核心闸门：用 TMDB 精确同名记录核对真实上线日期
+        verifier: Optional[_ReleaseVerifier] = None
+        if self._verify_release:
+            verifier = _ReleaseVerifier(
+                api_key=self._tmdb_key,
+                days=self._days,
+                data_path=self.get_data_path(),
+            )
+            # stats 是同一字典引用，后续更新会直接反映到 summary
+            summary["上线日期核验"] = verifier.stats
+        else:
+            logger.warn("[影视上新] 上线日期核验已关闭，推送内容可能包含老剧 / 无日期条目")
 
         new_items: List[_MediaItem] = []
         platform_index = 0
@@ -2100,11 +2572,26 @@ class StreamingNewAlert(_PluginBase):
                             api_token=self._api_token,
                             tmdb_key=self._tmdb_key if self._use_tmdb else "",
                             days=self._days,
+                            extra=self._plugin_extra(),
                         )
                     )
 
                 summary["platforms"][platform_label] = {"候选": len(platform_candidates)}
                 summary["candidates"] += len(platform_candidates)
+
+                if not platform_candidates:
+                    # 静默返回 0 条最难排查（优酷就是这么悄悄失效的），这里强制留痕
+                    logger.warn(
+                        f"[影视上新] {platform_label} 本次未抓到任何候选，"
+                        f"数据源可能已失效或网络不可达，建议执行自检确认"
+                    )
+                    summary["platforms"][platform_label]["告警"] = "未抓到候选，数据源可能失效"
+
+                if verifier:
+                    platform_candidates = self._apply_release_verification(
+                        platform_candidates, verifier, summary
+                    )
+                    summary["platforms"][platform_label]["核验后"] = len(platform_candidates)
 
                 kept: List[_MediaItem] = []
                 for item in platform_candidates:
@@ -2136,13 +2623,22 @@ class StreamingNewAlert(_PluginBase):
                 continue
 
         # 云盘资源数据源（金山文档每日更新表的 JSON 快照）
-        if self._kdocs_enabled:
+        # 1.3.0：云盘快照不保证「可在视频平台播放」，默认不抓取也不推送
+        if self._kdocs_enabled and not self._allow_cloud:
+            logger.info("[影视上新] 云盘资源不纳入上新推送（如需推送请开启「推送云盘资源条目」）")
+        if self._kdocs_enabled and self._allow_cloud:
             try:
                 cloud_candidates = _KdocsCloudSource.fetch(
                     days=self._days, data_url=self._kdocs_data_url
                 )
                 summary["platforms"]["云盘资源"] = {"候选": len(cloud_candidates)}
                 summary["candidates"] += len(cloud_candidates)
+
+                if verifier:
+                    cloud_candidates = self._apply_release_verification(
+                        cloud_candidates, verifier, summary
+                    )
+                    summary["platforms"]["云盘资源"]["核验后"] = len(cloud_candidates)
 
                 cloud_kept: List[_MediaItem] = []
                 for item in cloud_candidates:
@@ -2192,6 +2688,28 @@ class StreamingNewAlert(_PluginBase):
         logger.info(f"[影视上新] ===== 检查结束：{self._last_result} =====")
         return summary
 
+    def _apply_release_verification(
+        self,
+        items: List[_MediaItem],
+        verifier: "_ReleaseVerifier",
+        summary: Dict[str, Any],
+    ) -> List[_MediaItem]:
+        """对一批候选做 TMDB 上线日期核验，只返回「近期真实上线」的条目。"""
+        kept: List[_MediaItem] = []
+        for item in items:
+            try:
+                ok, reason = verifier.verify(item)
+            except Exception as err:
+                summary["filtered"] += 1
+                logger.debug(f"[影视上新] 上线日期核验异常《{item.name}》：{err}")
+                continue
+            if not ok:
+                summary["filtered"] += 1
+                logger.debug(f"[影视上新] 上线日期核验未通过《{item.name}》：{reason}")
+                continue
+            kept.append(item)
+        return kept
+
     def _push(self, items: List[_MediaItem]) -> None:
         """按平台分组构造通知内容，并通过系统全局消息通道发送。"""
         try:
@@ -2200,14 +2718,24 @@ class StreamingNewAlert(_PluginBase):
                 grouped.setdefault(item.platform_label, []).append(item)
 
             lines: List[str] = []
-            for platform_label in PLATFORMS.values():
+            if self._verify_release and self._tmdb_key:
+                lines.append(
+                    f"共 {len(items)} 条 · 均为近 {self._days} 天内真实上线"
+                    f"（已按 TMDB 首播/上映日期核对，剔除老剧、仅定档与无日期条目）"
+                )
+                lines.append("")
+
+            # 先按三大平台固定顺序，再附带云盘等自定义分组（避免云盘条目被漏掉）
+            ordered = [p for p in PLATFORMS.values() if grouped.get(p)]
+            ordered += [p for p in grouped if p not in PLATFORMS.values()]
+            for platform_label in ordered:
                 group = grouped.get(platform_label)
                 if not group:
                     continue
                 group.sort(key=lambda x: (x.online_date, x.name), reverse=True)
                 lines.append(f"【{platform_label}】")
                 for item in group:
-                    date_text = item.online_date or "近期上线"
+                    date_text = (f"{item.online_date} 上线") if item.online_date else "近期上线"
                     year_text = f"（{item.year}）" if item.year else ""
                     lines.append(f"· {item.name}{year_text} —— {item.mtype_label} / {date_text}")
                 lines.append("")
