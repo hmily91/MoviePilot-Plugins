@@ -2,6 +2,7 @@
   "plugin_id": "SubscribeAutoKeep",
   "render_mode": "vuetify",
   "description": "配置页 Vuetify JSON 快照。运行时由 __init__.py 的 get_form() 生成同一份结构，并把 sites 的 items 动态替换为 SiteOper.list_active() 的站点列表；本文件供审阅与二次开发使用。",
+  "rule_hint": "每行一条，新增=加一行，删除=删掉该行；# 开头为注释。普通文字按关键字匹配，也支持正则（忽略大小写）。匹配范围：标题 + 副标题 + 站点标签。",
   "form": [
     {
       "component": "VForm",
@@ -89,9 +90,67 @@
           "content": [
             {
               "component": "VCol",
+              "props": { "cols": 12, "md": 6 },
+              "content": [
+                {
+                  "component": "VTextarea",
+                  "props": {
+                    "model": "include_rules",
+                    "label": "包含规则（关键字、正则式）",
+                    "rows": 4,
+                    "clearable": true,
+                    "placeholder": "HDR|HDR10|DV|杜比视界",
+                    "hint": "命中任意一条才处理；留空 = 不限制。每行一条，# 开头为注释；普通文字按关键字匹配，也支持正则（忽略大小写）；匹配范围：标题 + 副标题 + 站点标签。插件规则优先于订阅自带规则。",
+                    "persistent-hint": true
+                  }
+                }
+              ]
+            },
+            {
+              "component": "VCol",
+              "props": { "cols": 12, "md": 6 },
+              "content": [
+                {
+                  "component": "VTextarea",
+                  "props": {
+                    "model": "exclude_rules",
+                    "label": "排除规则（关键字、正则式）",
+                    "rows": 4,
+                    "clearable": true,
+                    "placeholder": "HDR|HDR10|DV|杜比视界",
+                    "hint": "命中任意一条直接跳过，且优先于包含规则。每行一条，# 开头为注释；普通文字按关键字匹配，也支持正则（忽略大小写）；匹配范围：标题 + 副标题 + 站点标签。会与该订阅自带的排除规则叠加。",
+                    "persistent-hint": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "component": "VRow",
+          "content": [
+            {
+              "component": "VCol",
               "props": { "cols": 12 },
               "content": [
-                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "立即扫描一次", "events": { "click": { "api": "plugin/SubscribeAutoKeep/run", "method": "post", "params": {} } } }
+                {
+                  "component": "VAlert",
+                  "props": { "type": "info", "variant": "tonal", "density": "compact" },
+                  "text": "同一站点出现两个 2160p 全集时：只要不带 HDR 的那份 → 【排除】填 HDR|HDR10|DV|杜比视界；只要带 HDR 的那份 → 【包含】填 HDR|HDR10|DV。规则会自动叠加该订阅自带的包含/排除规则；保存时校验正则，非法会暂停扫描并推送通知。若筛完仍有多份，按做种数 → 体积自动选一份，不会重复清理或下载两份。"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "component": "VRow",
+          "content": [
+            {
+              "component": "VCol",
+              "props": { "cols": 12 },
+              "content": [
+                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "立即扫描一次", "events": { "click": { "api": "plugin/SubscribeAutoKeep/run", "method": "post", "params": {} } } },
+                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "校验规则", "events": { "click": { "api": "plugin/SubscribeAutoKeep/validate", "method": "post", "params": {} } } }
               ]
             }
           ]
@@ -120,6 +179,8 @@
     "test_mode": true,
     "cron": "0 4 * * *",
     "sites": [],
-    "resolution": "any"
+    "resolution": "any",
+    "include_rules": "",
+    "exclude_rules": ""
   }
 }

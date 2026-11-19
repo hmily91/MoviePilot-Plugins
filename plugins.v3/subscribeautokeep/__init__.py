@@ -6,8 +6,14 @@
 种子文件、转移记录、媒体库文件），清空媒体库目标路径后再下载整季全集，
 让 MP 正常完成转移与刮削 —— 便于长期保种，并保证整季视频规格一致。
 
-配置页只保留 5 项：启用 / Cron / 站点 / 分辨率 / 测试模式。
-其余行为（等待时长、删除范围、通知、先删后下）全部内置固化，不暴露开关。
+配置页只保留 7 项：启用 / Cron / 站点 / 分辨率 / 测试模式 /
+包含规则 / 排除规则。其余行为（等待时长、删除范围、通知、先删后下、
+多候选择优）全部内置固化，不暴露开关。
+
+包含 / 排除规则对齐 MP 原生订阅：每行一条，普通文字按关键字匹配，
+也支持正则；排除优先，包含最后判定。用户规则只能收紧内置安全闸门，
+不能放宽。同一订阅同一轮若筛出多份整季全集，只保留做种数最高的一份，
+避免重复清理并下载两份全集。
 
 严格遵循 V3 合同：
     - 主类继承 ``app.sdk.plugin._PluginBase``，定义在目录的 __init__.py；
@@ -62,10 +68,18 @@ DEFAULTS: dict[str, Any] = {
     "cron": "0 4 * * *",
     "sites": [],
     "resolution": "any",
+    "include_rules": "",
+    "exclude_rules": "",
 }
 
 #: 最近一次扫描报告
 REPORT_DATA_KEY = "subscribeautokeep_last_report"
+
+#: 规则说明（配置页 hint / README 保持同一套措辞）
+RULE_HINT = (
+    "每行一条，新增=加一行，删除=删掉该行；# 开头为注释。"
+    "普通文字按关键字匹配，也支持正则（忽略大小写）。匹配范围：标题 + 副标题 + 站点标签。"
+)
 
 
 def _text(value: Any) -> str:
@@ -81,7 +95,7 @@ class SubscribeAutoKeep(_PluginBase):
     plugin_name = "订阅自动保种助手"
     plugin_desc = "发现同季同分辨率的整季全集时，清理旧订阅及其种子/文件/记录，再下载整包以便保种与刮削"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "3.1.0"
+    plugin_version = "3.2.0"
     plugin_author = "hmily91"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "subscribeautokeep_"
@@ -93,6 +107,8 @@ class SubscribeAutoKeep(_PluginBase):
         self._cfg: dict[str, Any] = dict(DEFAULTS)
         self._enabled = False
         self._config_errors: list[str] = []
+        self._global_include_rules: list[core.Rule] = []
+        self._global_exclude_rules: list[core.Rule] = []
         self._queue = PendingQueue()
         self._lock = threading.Lock()
         self._last_report: dict[str, Any] = {}
@@ -104,18 +120,36 @@ class SubscribeAutoKeep(_PluginBase):
     # ------------------------------------------------------------------
 
     def init_plugin(self, config: Optional[dict[str, Any]] = None) -> None:
-        """读取配置、校验 Cron、恢复队列；允许重复调用。"""
+        """读取配置、校验 Cron 与规则合法性、恢复队列；允许重复调用。"""
         merged = dict(DEFAULTS)
         merged.update(config or {})
         self._cfg = merged
         self._enabled = bool(merged.get("enabled"))
 
-        # 没有用户正则了，保存配置时只需校验 Cron 是否合法
+        self._config_errors = []
         cron_ok, cron_msg = core.validate_cron(_text(merged.get("cron")))
-        self._config_errors = [] if cron_ok else [f"Cron 表达式非法：{cron_msg}"]
+        if not cron_ok:
+            self._config_errors.append(f"Cron 表达式非法：{cron_msg}")
+
+        # 编译全局规则。任何一行非法都暂停扫描：宁可不干活，也不能因为
+        # 「写错了被忽略」导致按更宽松的规则删除订阅与文件。
+        include_rules, include_errors = core.parse_rules(
+            _text(merged.get("include_rules")), "include"
+        )
+        exclude_rules, exclude_errors = core.parse_rules(
+            _text(merged.get("exclude_rules")), "exclude"
+        )
+        self._global_include_rules = include_rules if not include_errors else []
+        self._global_exclude_rules = exclude_rules if not exclude_errors else []
+        self._config_errors.extend(include_errors + exclude_errors)
+
         for error in self._config_errors:
             logger.error(f"【{self.plugin_name}】配置校验失败：{error}")
-            self._notify("配置有误", "插件已暂停扫描，请修正 Cron 表达式：\n" + error)
+        if self._config_errors:
+            self._notify(
+                "配置有误，已暂停扫描",
+                "请修正后重新保存配置：\n" + "\n".join(self._config_errors),
+            )
 
         self._queue = PendingQueue.from_list(self.get_data(QUEUE_DATA_KEY))
         self._last_report = self.get_data(REPORT_DATA_KEY) or {}
@@ -124,7 +158,8 @@ class SubscribeAutoKeep(_PluginBase):
             f"【{self.plugin_name}】已加载：启用={self._enabled} "
             f"测试模式={merged.get('test_mode')} Cron={merged.get('cron')} "
             f"站点={len(merged.get('sites') or [])} 分辨率={merged.get('resolution')} "
-            f"等待任务={len(self._queue.waiting())}"
+            f"包含规则={len(self._global_include_rules)} 排除规则={len(self._global_exclude_rules)} "
+            f"配置错误={len(self._config_errors)} 等待任务={len(self._queue.waiting())}"
         )
 
     def get_state(self) -> bool:
@@ -258,8 +293,32 @@ class SubscribeAutoKeep(_PluginBase):
                                     **{"closable-chips": True, "item-title": "title",
                                        "item-value": "value", "persistent-hint": True,
                                        "hint": "只检索勾选站点的整季全集"})])),
+                    row(
+                        (6, [field("include_rules", "VTextarea",
+                                    label="包含规则（关键字、正则式）",
+                                    rows=4, clearable=True,
+                                    placeholder="HDR|HDR10|DV|杜比视界",
+                                    **{"persistent-hint": True,
+                                       "hint": "命中任意一条才处理；留空 = 不限制。" + RULE_HINT
+                                               + " 插件规则优先于订阅自带规则。"})]),
+                        (6, [field("exclude_rules", "VTextarea",
+                                    label="排除规则（关键字、正则式）",
+                                    rows=4, clearable=True,
+                                    placeholder="HDR|HDR10|DV|杜比视界",
+                                    **{"persistent-hint": True,
+                                       "hint": "命中任意一条直接跳过，且优先于包含规则。" + RULE_HINT
+                                               + " 会与该订阅自带的排除规则叠加。"})]),
+                    ),
+                    row((12, [alert(
+                        "同一站点出现两个 2160p 全集时：只要不带 HDR 的那份 → 【排除】填 "
+                        "HDR|HDR10|DV|杜比视界；只要带 HDR 的那份 → 【包含】填 HDR|HDR10|DV。"
+                        "规则会自动叠加该订阅自带的包含/排除规则；保存时校验正则，非法会暂停扫描并推送通知。"
+                        "若筛完仍有多份，按做种数 → 体积自动选一份，不会重复清理或下载两份。",
+                        "info",
+                    )])),
                     row((12, [{"component": "VCol", "props": {"cols": 12},
-                               "content": [button("立即扫描一次", "run")]}])),
+                               "content": [button("立即扫描一次", "run"),
+                                           button("校验规则", "validate")]}])),
                     row((12, [alert(
                         "固定流程：命中同季整季全集 → 等待 15 分钟并持续复检种子是否还在（消失则取消）"
                         " → 删除订阅/种子及种子文件/转移记录/媒体库文件 → 10 分钟后自动下载整季全集。"
@@ -276,14 +335,23 @@ class SubscribeAutoKeep(_PluginBase):
         return []
 
     def get_api(self) -> list[dict[str, Any]]:
-        """只暴露一个「立即扫描」接口。"""
-        return [{
-            "path": "/run",
-            "endpoint": self.api_run,
-            "methods": ["POST"],
-            "summary": "立即扫描一次（仍受测试模式约束）",
-            "auth": True,
-        }]
+        """暴露「立即扫描」与「校验规则」两个接口。"""
+        return [
+            {
+                "path": "/run",
+                "endpoint": self.api_run,
+                "methods": ["POST"],
+                "summary": "立即扫描一次（仍受测试模式约束）",
+                "auth": True,
+            },
+            {
+                "path": "/validate",
+                "endpoint": self.api_validate,
+                "methods": ["POST"],
+                "summary": "校验 Cron 与包含/排除规则，并回显上轮被规则筛掉的真实标题",
+                "auth": True,
+            },
+        ]
 
     # ------------------------------------------------------------------
     # 基础工具
@@ -316,6 +384,42 @@ class SubscribeAutoKeep(_PluginBase):
             except (TypeError, ValueError):
                 continue
         return result
+
+    def _rules_for(self, subscribe: Any) -> tuple[list[core.Rule], list[core.Rule], str]:
+        """
+        合并插件全局规则与该订阅自带的 ``include`` / ``exclude``。
+
+        - 排除：两者取并集，任一命中即跳过（只收紧，不放宽）；
+        - 包含：插件全局规则优先（用户手动指定），未配置时才跟随订阅自带规则；
+        - 订阅自带规则非法时只记日志并忽略，不影响其它订阅。
+
+        :return: (包含规则, 排除规则, 可读的来源说明)
+        """
+        sub_include, include_errors = core.parse_rules(
+            _text(getattr(subscribe, "include", "")), "subscribe.include"
+        )
+        sub_exclude, exclude_errors = core.parse_rules(
+            _text(getattr(subscribe, "exclude", "")), "subscribe.exclude"
+        )
+        errors = include_errors + exclude_errors
+        if errors:
+            self._log(
+                f"订阅 {_text(getattr(subscribe, 'name', ''))} 自带规则非法，已忽略："
+                + "；".join(errors)
+            )
+
+        include = list(self._global_include_rules) if self._global_include_rules else sub_include
+        exclude = list(self._global_exclude_rules) + sub_exclude
+        include_source = (
+            "插件全局（优先）" if self._global_include_rules
+            else ("订阅自带" if sub_include else "未配置")
+        )
+        note = (
+            f"包含 {len(include)} 条（{include_source}），"
+            f"排除 {len(exclude)} 条"
+            f"（全局 {len(self._global_exclude_rules)} + 订阅 {len(sub_exclude)}）"
+        )
+        return include, exclude, note
 
     def _list_native_subscribes(self) -> list[Any]:
         """只读取 MP 原生电视剧订阅；手动添加的种子不在订阅表，天然排除。"""
@@ -362,11 +466,11 @@ class SubscribeAutoKeep(_PluginBase):
     # ------------------------------------------------------------------
 
     def scan(self, manual: bool = False) -> dict[str, Any]:
-        """Cron 主扫描：遍历原生订阅 → 站点检索 → 整季全集判定 → 命中入队。"""
+        """Cron 主扫描：遍历原生订阅 → 站点检索 → 规则+整季全集判定 → 候选收敛 → 入队。"""
         if not self._enabled:
             return {"ok": False, "reason": "插件未启用"}
         if self._config_errors:
-            self._log("Cron 配置非法，本轮扫描已跳过")
+            self._log("Cron 或包含/排除规则非法，本轮扫描已跳过")
             return {"ok": False, "reason": "配置校验未通过", "errors": self._config_errors}
         if not self._lock.acquire(blocking=False):
             self._log("上一轮扫描尚未结束，跳过本次触发")
@@ -379,6 +483,8 @@ class SubscribeAutoKeep(_PluginBase):
             "ok": True, "manual": manual, "subscribes": 0, "torrents": 0,
             "hits": 0, "queued": 0, "test_mode": test_mode,
             "resolution": resolution,
+            "rule_excluded": 0, "include_rejected": 0, "multi_candidate": 0,
+            "excluded_samples": [], "picked": [],
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         try:
@@ -390,7 +496,8 @@ class SubscribeAutoKeep(_PluginBase):
             summary["subscribes"] = len(subscribes)
             self._log(
                 f"开始扫描：原生电视剧订阅 {len(subscribes)} 条 | "
-                f"站点={sorted(site_ids) or '全部'} | 分辨率={resolution} | 测试模式={test_mode}"
+                f"站点={sorted(site_ids) or '全部'} | 分辨率={resolution} | 测试模式={test_mode} | "
+                f"全局包含 {len(self._global_include_rules)} 条 / 排除 {len(self._global_exclude_rules)} 条"
             )
 
             for sub in subscribes:
@@ -403,8 +510,14 @@ class SubscribeAutoKeep(_PluginBase):
                     self._log(f"订阅 {sub_name} S{season or '?'} 已在等待/替换流程中，跳过")
                     continue
 
+                include_rules, exclude_rules, rule_note = self._rules_for(sub)
+                self._log(f"订阅 {sub_name} S{season or '?'} 生效规则：{rule_note}")
                 contexts = self._search_contexts(sub)
                 self._log(f"订阅 {sub_name} S{season or '?'} 检索到 {len(contexts)} 条资源")
+
+                # 先收集该订阅的全部合格候选，再收敛为唯一一份。若同一订阅
+                # 有多份整季全集都直接入队，会重复清理并下载两份全集。
+                candidates: list[tuple[Any, Any, Any, tuple[int, float, str, str]]] = []
                 for context in contexts:
                     summary["torrents"] += 1
                     torrent = getattr(context, "torrent_info", None)
@@ -416,6 +529,8 @@ class SubscribeAutoKeep(_PluginBase):
                         torrent=snapshot,
                         allowed_site_ids=site_ids or None,
                         resolution=resolution,
+                        exclude_rules=exclude_rules,
+                        include_rules=include_rules,
                     )
                     self._log(
                         f"[{sub_name} S{season or '?'}] {snapshot.site_name or '未知站点'} | "
@@ -424,66 +539,126 @@ class SubscribeAutoKeep(_PluginBase):
                         f"整季全集={verdict.is_full_pack} | "
                         f"结论={'命中' if verdict.passed else '跳过'} ({verdict.stage}: {verdict.reason})"
                     )
+                    if verdict.stage == "排除规则":
+                        summary["rule_excluded"] += 1
+                        if len(summary["excluded_samples"]) < 8:
+                            summary["excluded_samples"].append({
+                                "title": snapshot.title[:120],
+                                "rule": verdict.matched_exclude,
+                            })
+                    elif verdict.stage == "包含规则":
+                        summary["include_rejected"] += 1
                     for stage, ok, detail in verdict.checks:
                         self._log(f"    · {stage} {'通过' if ok else '未过'}：{detail}")
                     if not verdict.passed:
                         continue
 
-                    summary["hits"] += 1
-                    evidence = self._evidence.build(sub)
-                    if test_mode:
-                        # 测试模式也打印一遍「本来会删什么」，方便核对证据链
-                        self._cleaner.run(evidence, test_mode=True)
-                        self._log(f"【测试模式】{sub_name} 已命中，仅记录，不入队 / 不删除 / 不下载")
-                        self._notify(
-                            "测试模式命中",
-                            f"{sub_name} S{season or '?'} 发现同季整季全集，未删除任何内容。\n"
-                            f"站点：{snapshot.site_name}\n标题：{snapshot.title}\n"
-                            f"分辨率：{','.join(verdict.resolutions) or '未标注'}\n"
-                            f"证据链：种子 {len(evidence['hashes'])} 个 / "
-                            f"下载侧文件 {len(evidence['download_paths'])} 个 / "
-                            f"媒体库文件 {len(evidence['media_paths'])} 个",
-                        )
-                        continue
+                    try:
+                        seeders = int(getattr(torrent, "seeders", 0) or 0)
+                    except (TypeError, ValueError):
+                        seeders = 0
+                    try:
+                        size = float(getattr(torrent, "size", 0) or 0)
+                    except (TypeError, ValueError):
+                        size = 0.0
+                    candidates.append((
+                        context, snapshot, verdict,
+                        (seeders, size, _text(getattr(torrent, "pubdate", "")), snapshot.title),
+                    ))
 
-                    evidence["replacement_context"] = self._context_payload(context)
-                    task = PendingTask(
-                        task_id=make_task_id(int(sub_id), snapshot.site_id, snapshot.title),
-                        subscribe_id=int(sub_id),
-                        subscribe_name=sub_name,
-                        season=int(season) if season is not None else None,
-                        media_source=_text(getattr(sub, "media_source", "")),
-                        media_id=_text(getattr(sub, "media_id", "")),
-                        site_id=snapshot.site_id,
-                        site_name=snapshot.site_name,
-                        torrent_title=snapshot.title,
-                        torrent_page_url=snapshot.page_url,
-                        torrent_enclosure=snapshot.enclosure,
-                        resolutions=verdict.resolutions,
-                        verdict_detail=verdict.as_dict(),
-                        evidence=evidence,
-                        created_ts=time.time(),
-                        execute_ts=time.time() + WAIT_MINUTES * 60,
-                        last_check_ts=time.time(),
-                        status="waiting",
+                if not candidates:
+                    continue
+
+                # 候选收敛：做种数 → 体积 → 发布时间 → 标题，保证跨轮次稳定
+                summary["hits"] += 1
+                if len(candidates) > 1:
+                    summary["multi_candidate"] += 1
+                chosen = core.best_index([item[3] for item in candidates])
+                context, snapshot, verdict, _ = candidates[chosen]
+                others = [c[1].title for i, c in enumerate(candidates) if i != chosen]
+                self._log(
+                    f"候选收敛 {sub_name} S{season or '?'}：{len(candidates)} 份符合 → "
+                    f"选用 [{snapshot.site_name}] {snapshot.title[:80]}，"
+                    f"其余 {len(others)} 份略过"
+                    + ("（如需精确指定请填包含/排除规则）" if others else "")
+                )
+                for title in others[:5]:
+                    self._log(f"    · 略过候选：{title[:100]}")
+                summary["picked"].append({
+                    "subscribe": sub_name,
+                    "season": season,
+                    "title": snapshot.title[:120],
+                    "site": snapshot.site_name,
+                    "include": verdict.matched_include,
+                    "candidates": len(candidates),
+                })
+                if others:
+                    self._notify(
+                        "检测到多份整季全集",
+                        f"{sub_name} S{season or '?'} 有 {len(candidates)} 份符合，"
+                        f"已按做种数/体积选用：\n{snapshot.title}\n"
+                        "若不是你要的那份，请在包含/排除规则里指定（例如 HDR）。",
                     )
-                    created = self._queue.upsert(task)
-                    if created:
-                        summary["queued"] += 1
-                        self._notify(
-                            "进入等待队列",
-                            f"订阅：{sub_name} S{season or '?'}\n整季全集：{snapshot.title}\n"
-                            f"等待 {WAIT_MINUTES} 分钟后执行清理，期间持续复检种子是否还在。",
-                        )
-                    self._log(
-                        f"{'已入队' if created else '刷新复核'}：{sub_name} S{season or '?'} → "
-                        f"{task.task_id}，倒计时 {WAIT_MINUTES} 分钟"
+
+                evidence = self._evidence.build(sub)
+                if test_mode:
+                    # 测试模式也打印一遍「本来会删什么」，方便核对证据链
+                    self._cleaner.run(evidence, test_mode=True)
+                    self._log(f"【测试模式】{sub_name} 已命中，仅记录，不入队 / 不删除 / 不下载")
+                    self._notify(
+                        "测试模式命中",
+                        f"{sub_name} S{season or '?'} 发现同季整季全集，未删除任何内容。\n"
+                        f"站点：{snapshot.site_name}\n标题：{snapshot.title}\n"
+                        f"命中包含规则：{verdict.matched_include or '未配置'}\n"
+                        f"分辨率：{','.join(verdict.resolutions) or '未标注'}\n"
+                        f"证据链：种子 {len(evidence['hashes'])} 个 / "
+                        f"下载侧文件 {len(evidence['download_paths'])} 个 / "
+                        f"媒体库文件 {len(evidence['media_paths'])} 个",
                     )
+                    continue
+
+                evidence["replacement_context"] = self._context_payload(context)
+                task = PendingTask(
+                    task_id=make_task_id(int(sub_id), snapshot.site_id, snapshot.title),
+                    subscribe_id=int(sub_id),
+                    subscribe_name=sub_name,
+                    season=int(season) if season is not None else None,
+                    media_source=_text(getattr(sub, "media_source", "")),
+                    media_id=_text(getattr(sub, "media_id", "")),
+                    site_id=snapshot.site_id,
+                    site_name=snapshot.site_name,
+                    torrent_title=snapshot.title,
+                    torrent_page_url=snapshot.page_url,
+                    torrent_enclosure=snapshot.enclosure,
+                    resolutions=verdict.resolutions,
+                    verdict_detail=verdict.as_dict(),
+                    evidence=evidence,
+                    created_ts=time.time(),
+                    execute_ts=time.time() + WAIT_MINUTES * 60,
+                    last_check_ts=time.time(),
+                    status="waiting",
+                )
+                created = self._queue.upsert(task)
+                if created:
+                    summary["queued"] += 1
+                    self._notify(
+                        "进入等待队列",
+                        f"订阅：{sub_name} S{season or '?'}\n整季全集：{snapshot.title}\n"
+                        f"命中包含规则：{verdict.matched_include or '未配置'}\n"
+                        f"等待 {WAIT_MINUTES} 分钟后执行清理，期间持续复检种子是否还在。",
+                    )
+                self._log(
+                    f"{'已入队' if created else '刷新复核'}：{sub_name} S{season or '?'} → "
+                    f"{task.task_id}，倒计时 {WAIT_MINUTES} 分钟"
+                )
 
             self._queue.purge_terminal()
             summary["summary"] = (
                 f"扫描订阅 {summary['subscribes']} 条 / 资源 {summary['torrents']} 条 / "
-                f"命中 {summary['hits']} 条 / 新入队 {summary['queued']} 条"
+                f"命中订阅 {summary['hits']} 条 / 新入队 {summary['queued']} 条 / "
+                f"排除规则筛掉 {summary['rule_excluded']} 条 / "
+                f"包含规则拒绝 {summary['include_rejected']} 条 / "
+                f"多候选订阅 {summary['multi_candidate']} 条"
             )
             self._last_report = summary
             self._save_state()
@@ -500,20 +675,33 @@ class SubscribeAutoKeep(_PluginBase):
     # ------------------------------------------------------------------
 
     def _torrent_still_searchable(self, task: PendingTask) -> bool:
-        """复检整季全集种子是否仍能在勾选站点检索到。"""
+        """复检选中的那一份整季全集是否仍能在勾选站点检索到。"""
+        # 扫描用订阅的 keyword 检索，复检必须用同一个关键字，否则可能
+        # 因为订阅 name ≠ keyword 而误判为「种子消失」，白白取消清理。
+        keyword = task.subscribe_name
+        try:
+            from app.db.oper.subscribe import SubscribeOper
+
+            subscribe = SubscribeOper().get(int(task.subscribe_id))
+            if subscribe is not None:
+                keyword = _text(getattr(subscribe, "keyword", "")) or keyword
+        except Exception as error:
+            self._log(f"复检读取订阅关键字失败，回退订阅名称：{error}")
         try:
             from app.chain.search import SearchChain
             from app.schemas.types import MediaType
 
             sites = sorted(self._site_ids()) or None
             contexts = SearchChain().search_by_title(
-                title=task.subscribe_name, sites=sites, mtype=MediaType.TV,
+                title=keyword, sites=sites, mtype=MediaType.TV,
             ) or []
+            expected = (task.torrent_title or "").strip()
             for context in contexts:
                 torrent = getattr(context, "torrent_info", None)
-                title = _text(getattr(torrent, "title", "")) if torrent else ""
-                if title and task.torrent_title and (
-                    title == task.torrent_title or task.torrent_title in title
+                title = _text(getattr(torrent, "title", "")).strip() if torrent else ""
+                # 站点偶尔会给标题追加 [热门] 等标签，双向包含更稳
+                if title and expected and (
+                    title == expected or expected in title or title in expected
                 ):
                     return True
             return False
@@ -673,3 +861,40 @@ class SubscribeAutoKeep(_PluginBase):
     def api_run(self) -> dict[str, Any]:
         """API：立即执行一次扫描（仍受测试模式约束）。"""
         return self.scan(manual=True)
+
+    def api_validate(self) -> dict[str, Any]:
+        """API：校验 Cron 与规则，并回显上一轮真实标题的筛选结果。"""
+        cron_value = _text(self._cfg.get("cron"))
+        cron_ok, cron_msg = core.validate_cron(cron_value)
+        include_rules, include_errors = core.parse_rules(
+            _text(self._cfg.get("include_rules")), "include"
+        )
+        exclude_rules, exclude_errors = core.parse_rules(
+            _text(self._cfg.get("exclude_rules")), "exclude"
+        )
+        errors = ([] if cron_ok else [f"Cron 表达式非法：{cron_msg}"]) \
+            + include_errors + exclude_errors
+        report = self._last_report or {}
+        return {
+            "ok": not errors,
+            "message": (
+                f"校验通过：Cron 合法，包含 {len(include_rules)} 条 / 排除 {len(exclude_rules)} 条。"
+                if not errors else "校验失败：" + "；".join(errors)
+            ),
+            "cron": {"value": cron_value, "valid": cron_ok, "detail": cron_msg},
+            "include_rules": {"count": len(include_rules), "items": [r.raw for r in include_rules]},
+            "exclude_rules": {"count": len(exclude_rules), "items": [r.raw for r in exclude_rules]},
+            "errors": errors,
+            "last_scan": {
+                "at": report.get("started_at"),
+                "rule_excluded": report.get("rule_excluded", 0),
+                "include_rejected": report.get("include_rejected", 0),
+                "multi_candidate": report.get("multi_candidate", 0),
+                "excluded_samples": report.get("excluded_samples", []),
+                "picked": report.get("picked", []),
+            },
+            "hint": (
+                "校验通过后请保持测试模式跑一次「立即扫描一次」，"
+                "用 last_scan.excluded_samples / picked 核对规则是否筛对了资源。"
+            ),
+        }

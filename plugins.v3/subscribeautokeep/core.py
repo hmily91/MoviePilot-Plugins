@@ -1,11 +1,12 @@
 """
 订阅自动保种助手 - 全集判定引擎（纯 Python，不依赖 MoviePilot 宿主）。
 
-只回答一个问题：这条站点种子，是不是「与订阅同一季、目标分辨率、完整一季打包」。
-所有判定规则内置，不再向用户暴露正则配置。顺序不可调换，任一层不过即跳过。
+只回答一个问题：这条站点种子，是不是「与订阅同一季、目标分辨率、完整一季打包，
+且用户愿意要的那一份」。顺序不可调换，任一层不过即跳过。
 
 判定链：
     1. 站点过滤
+    1b. 排除规则（用户 / 订阅自带，命中任意一条即跳过）
     2. 宿主 MetaInfo 季集闸门（S01 = 完结季；S01 E40 = 分集）
     3. 多季 / 跨季排除
     4. 单集 / 分段包闸门（标题 + 副标题）
@@ -13,9 +14,13 @@
     6. 季号解析并与订阅季号严格比对
     7. 分辨率筛选（全部 / 4k / 1080p / 720p）
     8. 全集证据（宿主识别为完结季，或「全N集 / 完结 / Complete / 全集」文本）
+    9. 包含规则（用户 / 订阅自带，配置后必须命中任意一条）
 
-设计原则：宁可漏判，不可误判。插件会删订阅、种子和文件，把整包误判成分集
-只是「本次不清理」，把分集或跨季误判成整包则会造成不可逆的误删。
+设计原则：
+    - 宁可漏判，不可误判。插件会删订阅、种子和文件，把整包误判成分集只是
+      「本次不清理」，把分集或跨季误判成整包则会造成不可逆的误删。
+    - 用户规则只能「收紧」，绝不能放宽内置安全闸门。所以排除放在最前、
+      包含放在最后：即使只填一条 `HDR`，分集 / 跨季 / 错分辨率依然会被拒绝。
 """
 
 from __future__ import annotations
@@ -207,11 +212,17 @@ class TorrentSnapshot:
     host_season_episode: str = ""
     host_resolution: str = ""
     host_has_metadata: bool = False
+    labels: str = ""
 
     @property
     def any_text(self) -> str:
         """标题 + 副标题 + 宿主识别的分辨率，用于完整性证据与分辨率检测。"""
         return " ".join(x for x in (self.title, self.subtitle, self.host_resolution) if x)
+
+    @property
+    def rule_text(self) -> str:
+        """用户包含/排除规则的匹配范围：标题 + 副标题 + 站点标签。"""
+        return " ".join(x for x in (self.title, self.subtitle, self.labels) if x)
 
 
 @dataclass
@@ -224,6 +235,8 @@ class Verdict:
     seasons: list[int] = field(default_factory=list)
     resolutions: list[str] = field(default_factory=list)
     is_full_pack: bool = False
+    matched_exclude: str = ""
+    matched_include: str = ""
     checks: list[tuple[str, bool, str]] = field(default_factory=list)
 
     def add_check(self, stage: str, ok: bool, detail: str) -> None:
@@ -244,6 +257,8 @@ class Verdict:
             "seasons": self.seasons,
             "resolutions": self.resolutions,
             "is_full_pack": self.is_full_pack,
+            "matched_exclude": self.matched_exclude,
+            "matched_include": self.matched_include,
             "checks": [{"stage": s, "ok": o, "detail": d} for s, o, d in self.checks],
         }
 
@@ -314,6 +329,54 @@ def validate_cron(expression: str) -> tuple[bool, str]:
     return True, "合法"
 
 
+# ---------------------------------------------------------------------------
+# 包含 / 排除规则（对齐 MP 原生订阅的「关键字、正则式」）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Rule:
+    """一条规则。普通文字即关键字子串匹配；写 `A|B` 或量词表达式即正则。"""
+
+    raw: str
+    pattern: re.Pattern[str]
+    source: str = "plugin"  # plugin=插件全局；subscribe=订阅自带
+
+
+def parse_rules(text: str, source: str = "plugin") -> tuple[list[Rule], list[str]]:
+    """
+    解析规则文本：每行一条，`#` 开头为注释，空行忽略，统一忽略大小写。
+    普通文字按关键字子串匹配，写成 `A|B` 或量词表达式即正则。
+
+    订阅自带的 include / exclude 是单个字符串（MP 约定用 `|` 组合正则），
+    因此整行原样编译，不按 `|` 拆分，避免把 `HDR|DV` 拆坏。
+
+    :return: (合法规则列表, 错误信息列表)。非法行会被跳过，绝不半编译上线。
+    """
+    rules: list[Rule] = []
+    errors: list[str] = []
+    for lineno, line in enumerate((text or "").splitlines(), 1):
+        raw = line.strip()
+        if not raw or raw.startswith("#"):
+            continue
+        try:
+            rules.append(Rule(raw=raw, pattern=re.compile(raw, re.I), source=source))
+        except re.error as error:
+            errors.append(f"{source} 第 {lineno} 行 {raw!r}：{error}")
+    return rules, errors
+
+
+def match_rule(rules: list[Rule], text: str) -> Optional[Rule]:
+    """返回第一条命中的规则；全部不命中返回 None。"""
+    for rule in rules:
+        try:
+            if rule.pattern.search(text or ""):
+                return rule
+        except re.error:
+            continue
+    return None
+
+
 def _to_int(value: Any) -> Optional[int]:
     """把宿主字段安全转成整数。"""
     if value is None or value == "":
@@ -335,14 +398,18 @@ def evaluate(
     torrent: TorrentSnapshot,
     allowed_site_ids: Optional[set[int]] = None,
     resolution: str = "any",
+    exclude_rules: Optional[list[Rule]] = None,
+    include_rules: Optional[list[Rule]] = None,
 ) -> Verdict:
     """
-    判定一条种子是否为「同季 + 目标分辨率 + 完整一季打包」。
+    判定一条种子是否为「同季 + 目标分辨率 + 完整一季打包 + 用户要的那一份」。
 
     :param subscribe_season: MP 原生订阅的指定季号，必须与种子季号严格相等
     :param torrent: 归一化后的种子文本
     :param allowed_site_ids: 勾选的站点 ID；None 或空集合表示不限制
     :param resolution: any / 4k / 1080p / 720p
+    :param exclude_rules: 排除规则，命中任意一条即跳过（最先判定）
+    :param include_rules: 包含规则，配置后必须命中任意一条（最后判定）；空 = 不限制
     """
     verdict = Verdict()
     title = torrent.title or ""
@@ -354,6 +421,19 @@ def evaluate(
         if torrent.site_id is None or int(torrent.site_id) not in allowed_site_ids:
             return verdict.fail("站点", f"站点 {torrent.site_name or torrent.site_id} 不在勾选范围内")
         verdict.add_check("站点", True, f"命中勾选站点：{torrent.site_name or torrent.site_id}")
+
+    # 1b. 排除规则优先：命中任意一条即跳过，且优先于包含规则
+    if exclude_rules:
+        hit = match_rule(exclude_rules, torrent.rule_text)
+        if hit:
+            verdict.matched_exclude = hit.raw
+            return verdict.fail(
+                "排除规则",
+                f"命中排除规则 [{hit.source}] {hit.raw!r}，按优先级直接跳过",
+            )
+        verdict.add_check("排除规则", True, f"{len(exclude_rules)} 条排除规则均未命中")
+    else:
+        verdict.add_check("排除规则", True, "未配置排除规则")
 
     # 2. 宿主季集优先：MP V3 把 S01 视为完结季、S01 E40 视为分集
     if torrent.host_has_metadata:
@@ -439,11 +519,26 @@ def evaluate(
         "MP 识别为完结季" if host_pack else "文本含整包关键词",
     )
 
+    # 9. 包含规则：放在所有内置安全闸门之后，用户规则只能收紧、不能放宽
+    include_note = ""
+    if include_rules:
+        hit = match_rule(include_rules, torrent.rule_text)
+        if not hit:
+            return verdict.fail(
+                "包含规则",
+                f"已配置 {len(include_rules)} 条包含规则但未命中任何一条，跳过该资源",
+            )
+        verdict.matched_include = hit.raw
+        include_note = f"；命中包含规则 [{hit.source}] {hit.raw!r}"
+        verdict.add_check("包含规则", True, f"命中 [{hit.source}] {hit.raw!r}")
+    else:
+        verdict.add_check("包含规则", True, "未配置包含规则，不额外限制")
+
     verdict.passed = True
     verdict.stage = "命中"
     verdict.reason = (
         f"同季整季打包 S{seasons[0]:02d}，分辨率 {','.join(resolutions) or '未标注'}，"
-        f"目标档位 {resolution}"
+        f"目标档位 {resolution}{include_note}"
     )
     return verdict
 
@@ -488,6 +583,12 @@ def build_snapshot_from_torrent(torrent: Any, context: Any = None) -> TorrentSna
     if not host_episodes and begin_episode is not None:
         host_episodes = [begin_episode]
 
+    raw_labels = g("labels", []) or []
+    if isinstance(raw_labels, (list, tuple, set)):
+        labels = " ".join(str(x) for x in raw_labels)
+    else:
+        labels = str(raw_labels)
+
     return TorrentSnapshot(
         title=str(g("title")),
         subtitle=str(g("description")),
@@ -502,4 +603,32 @@ def build_snapshot_from_torrent(torrent: Any, context: Any = None) -> TorrentSna
         host_season_episode=str(mg("season_episode") or ""),
         host_resolution=str(mg("resource_pix") or ""),
         host_has_metadata=begin_season is not None,
+        labels=labels,
     )
+
+
+# ---------------------------------------------------------------------------
+# 多候选择优：同一订阅同一轮只保留一份整季全集
+# ---------------------------------------------------------------------------
+
+
+def best_index(stats: list[tuple[int, float, str, str]]) -> int:
+    """
+    从同季同分辨率、且都通过规则筛选的多个整季全集中挑唯一一份。
+
+    :param stats: 每项为 ``(做种数, 体积字节, 发布时间, 标题)``
+    :return: 最优候选的下标；空列表返回 -1
+
+    优先级：做种数 → 体积 → 发布时间 → 标题字典序最小。最后一级只为保证
+    跨轮次结果稳定（不会今天选 A、明天选 B），真正想精确选哪一份请用
+    包含 / 排除规则，把候选收敛到 1 个。
+    """
+    if not stats:
+        return -1
+    scores = [
+        (int(item[0] or 0), float(item[1] or 0.0), str(item[2] or ""))
+        for item in stats
+    ]
+    best = max(scores)
+    tied = [i for i, score in enumerate(scores) if score == best]
+    return min(tied, key=lambda i: str(stats[i][3] or ""))

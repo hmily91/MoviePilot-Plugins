@@ -355,5 +355,174 @@ class TestQueue(unittest.TestCase):
         self.assertEqual(len(queue.from_list(queue.to_list()).all()), 1)
 
 
+class TestRules(unittest.TestCase):
+    """包含 / 排除规则：解析、优先级、HDR 场景、只收紧不放宽。"""
+
+    SDR_TITLE = "Reacher S04 2026 2160p WEB-DL DDP5.1 Atmos H265-Pure@HDSWEB"
+    HDR_TITLE = "Reacher S04 2026 2160p WEB-DL DDP5.1 Atmos H265 HDR DV-Pure@HDSWEB"
+    SUBTITLE = "美剧: 侠探杰克第4季 全08集 | 主演: 阿兰·里奇森"
+
+    @staticmethod
+    def rules(text: str, source: str = "plugin") -> list[core.Rule]:
+        parsed, errors = core.parse_rules(text, source)
+        assert not errors, errors
+        return parsed
+
+    def test_two_2160p_candidates_both_pass_by_default(self):
+        """未配置规则时，两份 2160p 全集都能通过——正是需要手动选择的场景。"""
+        self.assertTrue(verdict_for(self.SDR_TITLE, self.SUBTITLE, 4).passed)
+        self.assertTrue(verdict_for(self.HDR_TITLE, self.SUBTITLE, 4).passed)
+
+    def test_parse_rules(self):
+        parsed, errors = core.parse_rules(
+            "# 注释行\n\nHDR|DV\n1080p\nATeam", "include"
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual([r.raw for r in parsed], ["HDR|DV", "1080p", "ATeam"])
+        self.assertTrue(all(r.source == "include" for r in parsed))
+        # 普通关键字按子串匹配且忽略大小写
+        self.assertTrue(core.match_rule(parsed, "Show 1080P WEB-DL") is not None)
+        self.assertTrue(core.match_rule(parsed, "show ateam release") is not None)
+
+    def test_invalid_regex_is_reported(self):
+        for bad in ("[", "(", "*", "a{2,1}", "(?P<"):
+            parsed, errors = core.parse_rules(bad, "exclude")
+            self.assertEqual(parsed, [])
+            self.assertTrue(errors, f"应识别非法正则：{bad!r}")
+
+    def test_invalid_line_does_not_silently_pass(self):
+        """非法行必须被报错，而不是被忽略成「没有排除规则」。"""
+        parsed, errors = core.parse_rules("HDR\n[\n", "exclude")
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(len(errors), 1)
+
+    def test_exclude_wins_over_include(self):
+        """同一资源同时命中包含与排除时，排除优先。"""
+        verdict = verdict_for(
+            self.HDR_TITLE, self.SUBTITLE, 4,
+            include_rules=self.rules("HDR"),
+            exclude_rules=self.rules("DV"),
+        )
+        self.assertFalse(verdict.passed)
+        self.assertEqual(verdict.stage, "排除规则")
+        self.assertEqual(verdict.matched_exclude, "DV")
+
+    def test_include_rule_is_required_when_configured(self):
+        hit = verdict_for(
+            self.HDR_TITLE, self.SUBTITLE, 4,
+            include_rules=self.rules(r"HDR|HDR10|DV"),
+        )
+        self.assertTrue(hit.passed)
+        self.assertEqual(hit.matched_include, r"HDR|HDR10|DV")
+        miss = verdict_for(
+            self.SDR_TITLE, self.SUBTITLE, 4,
+            include_rules=self.rules(r"HDR|HDR10|DV"),
+        )
+        self.assertFalse(miss.passed)
+        self.assertEqual(miss.stage, "包含规则")
+
+    def test_hdr_scenario_keep_non_hdr(self):
+        """只要不带 HDR 的那份 → 排除填 HDR|DV|杜比视界。"""
+        exclude = self.rules(r"HDR|HDR10|DV|Dolby\s*Vision|杜比视界")
+        self.assertTrue(verdict_for(
+            self.SDR_TITLE, self.SUBTITLE, 4, exclude_rules=exclude,
+        ).passed)
+        rejected = verdict_for(
+            self.HDR_TITLE, self.SUBTITLE, 4, exclude_rules=exclude,
+        )
+        self.assertFalse(rejected.passed)
+        self.assertEqual(rejected.stage, "排除规则")
+
+    def test_hdr_scenario_keep_hdr_only(self):
+        """只要带 HDR 的那份 → 包含填 HDR|HDR10|DV。"""
+        include = self.rules(r"HDR|HDR10|DV")
+        self.assertTrue(verdict_for(
+            self.HDR_TITLE, self.SUBTITLE, 4, include_rules=include,
+        ).passed)
+        self.assertFalse(verdict_for(
+            self.SDR_TITLE, self.SUBTITLE, 4, include_rules=include,
+        ).passed)
+
+    def test_rules_cannot_relax_safety_gates(self):
+        """用户规则只能收紧：即使包含 HDR，分集 / 跨季 / 错分辨率仍被拒。"""
+        include = self.rules("HDR")
+        episode = verdict_for(
+            "Reacher S04E08 2160p WEB-DL HDR-GROUP", "第8集", 4,
+            include_rules=include,
+        )
+        self.assertFalse(episode.passed)
+        self.assertNotEqual(episode.stage, "包含规则")
+        cross_season = verdict_for(
+            "Reacher S03-S04 2160p Complete HDR-GROUP", "全16集", 4,
+            include_rules=include,
+        )
+        self.assertFalse(cross_season.passed)
+        wrong_resolution = verdict_for(
+            "Reacher S04 1080p WEB-DL HDR 全08集-GROUP", "全08集", 4,
+            include_rules=include, resolution="4k",
+        )
+        self.assertFalse(wrong_resolution.passed)
+        self.assertEqual(wrong_resolution.stage, "分辨率")
+
+    def test_rules_match_subtitle_and_labels(self):
+        snapshot = core.TorrentSnapshot(
+            title="Reacher S04 2160p WEB-DL 全08集-GROUP",
+            subtitle="杜比视界 全08集",
+            labels="免费 官方",
+        )
+        self.assertIn("杜比视界", snapshot.rule_text)
+        self.assertIn("免费", snapshot.rule_text)
+        include = self.rules("杜比视界")
+        self.assertTrue(core.evaluate(
+            subscribe_season=4, torrent=snapshot, include_rules=include,
+        ).passed)
+        labels_only = self.rules("官方")
+        self.assertTrue(core.evaluate(
+            subscribe_season=4, torrent=snapshot, include_rules=labels_only,
+        ).passed)
+
+    def test_empty_rules_backward_compatible(self):
+        """不配置任何规则时行为与 v3.1.0 一致。"""
+        self.assertTrue(verdict_for(
+            self.SDR_TITLE, self.SUBTITLE, 4,
+            include_rules=[], exclude_rules=[],
+        ).passed)
+        self.assertFalse(verdict_for(
+            "Reacher S04E08 2160p WEB-DL-GROUP", "第8集", 4,
+        ).passed)
+
+
+class TestBestIndex(unittest.TestCase):
+    """多候选择优：做种数优先、同分稳定、空输入安全。"""
+
+    def test_pick_highest_seeders(self):
+        stats = [
+            (10, 100.0, "2026-01-01", "A 2160p"),
+            (30, 100.0, "2026-01-01", "B 2160p HDR"),
+            (5, 999.0, "2026-01-01", "C 2160p"),
+        ]
+        self.assertEqual(core.best_index(stats), 1)
+
+    def test_size_and_pubdate_break_ties(self):
+        stats = [
+            (10, 100.0, "2026-01-01", "A"),
+            (10, 200.0, "2026-01-01", "B"),
+        ]
+        self.assertEqual(core.best_index(stats), 1)
+        stats2 = [
+            (10, 200.0, "2026-01-01", "A"),
+            (10, 200.0, "2026-02-01", "B"),
+        ]
+        self.assertEqual(core.best_index(stats2), 1)
+
+    def test_stable_when_fully_tied(self):
+        stats = [(10, 100.0, "2026-01-01", "Z"), (10, 100.0, "2026-01-01", "A")]
+        self.assertEqual(core.best_index(stats), 1)
+        self.assertEqual(core.best_index(list(reversed(stats))), 0)
+
+    def test_empty_input(self):
+        self.assertEqual(core.best_index([]), -1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
