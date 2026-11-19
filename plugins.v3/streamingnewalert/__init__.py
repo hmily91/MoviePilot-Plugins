@@ -1882,9 +1882,9 @@ class StreamingNewAlert(_PluginBase):
 
     # ---------------------------- 插件元信息 ----------------------------
     plugin_name = "影视平台上新提醒"
-    plugin_desc = "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，并接入金山文档云盘资源每日更新表，按平台分组推送提醒，永久去重不重复打扰。"
+    plugin_desc = "监控爱奇艺 / 优酷 / 腾讯视频的电影与电视剧上新，用 TMDB 核对真实上线日期，只推送近 N 天内已上线且可在平台播放的正片，按平台分组推送提醒并永久去重。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.2.1"
+    plugin_version = "1.3.0"
     plugin_author = "hmily"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "streamingnew_"
@@ -2852,7 +2852,7 @@ class StreamingNewAlert(_PluginBase):
 try:
     logger.info(
         "[影视上新] 插件模块加载完成 v%s：插件类 StreamingNewAlert 已定义，等待宿主实例化",
-        plugin_version,
+        StreamingNewAlert.plugin_version,
     )
 except Exception:  # noqa: BLE001  诊断日志绝不影响加载
     pass
