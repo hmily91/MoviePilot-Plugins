@@ -2,7 +2,6 @@
   "plugin_id": "SubscribeAutoKeep",
   "render_mode": "vuetify",
   "description": "配置页 Vuetify JSON 快照。运行时由 __init__.py 的 get_form() 生成同一份结构，并把 sites 的 items 动态替换为 SiteOper.list_active() 的站点列表；本文件供审阅与二次开发使用。",
-  "rule_format": "每行一条「字段::正则」，字段可选 title / subtitle / release_group / note / any，省略默认 title，以 # 开头为注释。新增=加一行，删除=删掉该行。",
   "form": [
     {
       "component": "VForm",
@@ -17,7 +16,7 @@
                 {
                   "component": "VAlert",
                   "props": { "type": "warning", "variant": "tonal", "density": "compact" },
-                  "text": "本插件会删除订阅、种子、转移记录与文件，且不可回滚。请先用【测试模式】跑一轮，核对日志里的证据链。"
+                  "text": "命中后本插件会删除订阅、种子及种子文件、转移记录、媒体库文件，不可回滚。请务必先用【测试模式】跑一轮，核对日志里的证据链，再关闭测试模式。"
                 }
               ]
             }
@@ -27,14 +26,36 @@
           "component": "VRow",
           "content": [
             { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "enabled", "label": "启用插件" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "test_mode", "label": "测试模式（只记日志/通知，不删除、不入队、不下载）" } }] }
+            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "test_mode", "label": "测试模式（只记日志，不删除）" } }] }
           ]
         },
         {
           "component": "VRow",
           "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VTextField", "props": { "model": "cron", "label": "Cron 定时表达式", "placeholder": "0 4 * * *", "hint": "5 段：分 时 日 月 周", "persistent-hint": true } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VTextField", "props": { "model": "delay_minutes", "label": "删前稳定性等待（分钟）", "placeholder": "15", "hint": "期间持续复检整包种子，消失则取消清理", "persistent-hint": true } }] }
+            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VTextField", "props": { "model": "cron", "label": "Cron 定时表达式", "placeholder": "0 4 * * *", "hint": "5 段：分 时 日 月 周，例如每天 04:00 为 0 4 * * *", "persistent-hint": true } }] },
+            {
+              "component": "VCol",
+              "props": { "cols": 12, "md": 6 },
+              "content": [
+                {
+                  "component": "VSelect",
+                  "props": {
+                    "model": "resolution",
+                    "label": "分辨率",
+                    "item-title": "title",
+                    "item-value": "value",
+                    "items": [
+                      { "title": "全部", "value": "any" },
+                      { "title": "4k", "value": "4k" },
+                      { "title": "1080p", "value": "1080p" },
+                      { "title": "720p", "value": "720p" }
+                    ],
+                    "hint": "选一档可保证新旧资源规格一致；「全部」= 不限制",
+                    "persistent-hint": true
+                  }
+                }
+              ]
+            }
           ]
         },
         {
@@ -48,14 +69,15 @@
                   "component": "VSelect",
                   "props": {
                     "model": "sites",
-                    "label": "监控站点（多选，留空=全部站点）",
+                    "label": "监控站点（多选，留空 = 全部站点）",
                     "items": [],
                     "item-title": "title",
                     "item-value": "value",
                     "multiple": true,
                     "chips": true,
                     "closable-chips": true,
-                    "hint": "运行时动态注入 [{title: 站点名, value: 站点ID}]"
+                    "hint": "运行时动态注入 [{title: 站点名, value: 站点ID}]；只检索勾选站点的整季全集",
+                    "persistent-hint": true
                   }
                 }
               ]
@@ -67,29 +89,11 @@
           "content": [
             {
               "component": "VCol",
-              "props": { "cols": 12, "md": 8 },
+              "props": { "cols": 12 },
               "content": [
-                {
-                  "component": "VSelect",
-                  "props": {
-                    "model": "resolutions",
-                    "label": "目标分辨率（多选）",
-                    "item-title": "title",
-                    "item-value": "value",
-                    "multiple": true,
-                    "chips": true,
-                    "closable-chips": true,
-                    "items": [
-                      { "title": "4K / 2160P / UHD", "value": "2160p" },
-                      { "title": "1080P / FHD", "value": "1080p" },
-                      { "title": "720P", "value": "720p" },
-                      { "title": "480P / SD", "value": "480p" }
-                    ]
-                  }
-                }
+                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "立即扫描一次", "events": { "click": { "api": "plugin/SubscribeAutoKeep/run", "method": "post", "params": {} } } }
               ]
-            },
-            { "component": "VCol", "props": { "cols": 12, "md": 4 }, "content": [{ "component": "VSwitch", "props": { "model": "allow_unknown_resolution", "label": "放行未标注分辨率" } }] }
+            }
           ]
         },
         {
@@ -102,111 +106,10 @@
                 {
                   "component": "VAlert",
                   "props": { "type": "info", "variant": "tonal", "density": "compact" },
-                  "text": "规则格式：每行一条「字段::正则」，字段可选 title / subtitle / release_group / note / any。新增=加一行，删除=删掉该行。保存后可用下方按钮测试。"
+                  "text": "固定流程：命中同季整季全集 → 等待 15 分钟并持续复检种子是否还在（消失则取消） → 删除订阅/种子及种子文件/转移记录/媒体库文件 → 10 分钟后自动下载整季全集。先删旧再下新，MP 才会重新转移刮削。"
                 }
               ]
             }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VTextarea", "props": { "model": "include_rules", "label": "包含正则列表（满足任意一条即命中）", "rows": 6, "auto-grow": true, "hint": "内置示例：Complete|Season\\s*\\d+|全集 / 全\\s*\\d+\\s*集", "persistent-hint": true } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VTextarea", "props": { "model": "exclude_rules", "label": "排除正则列表（命中任意一条即跳过，优先级最高）", "rows": 6, "auto-grow": true, "hint": "先判排除，未命中再判包含", "persistent-hint": true } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "require_include_rule", "label": "必须命中至少一条包含正则" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "require_completeness_evidence", "label": "额外要求全N集/Complete 等整包关键词" } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "follow_subscribe_settings", "label": "跟随 MP 订阅自带设置（站点/分辨率/排除/总集数）" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "verify_episode_count", "label": "校验「全N集」与订阅总集数一致" } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            {
-              "component": "VCol",
-              "props": { "cols": 12 },
-              "content": [
-                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "测试正则与季集判定", "events": { "click": { "api": "plugin/SubscribeAutoKeep/test_rules", "method": "post", "params": {} } } },
-                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "立即扫描一次", "events": { "click": { "api": "plugin/SubscribeAutoKeep/run", "method": "post", "params": {} } } },
-                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "查看等待队列", "events": { "click": { "api": "plugin/SubscribeAutoKeep/queue", "method": "get", "params": {} } } },
-                { "component": "VBtn", "props": { "color": "error", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "清空等待队列", "events": { "click": { "api": "plugin/SubscribeAutoKeep/queue/clear", "method": "post", "params": {} } } },
-                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "校验当前配置", "events": { "click": { "api": "plugin/SubscribeAutoKeep/validate", "method": "get", "params": {} } } }
-              ]
-            }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "action_delete_subscribe", "label": "L0 删除 MP 原生订阅" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "action_delete_torrent", "label": "L1 删除下载器种子（qB/TR）" } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "action_delete_torrent_files", "label": "L1 让下载器同时删种子文件" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "action_delete_local_files", "label": "L1b 删除下载目录具体文件（默认关）" } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "action_delete_media_files", "label": "L3 删除媒体库文件（高危，默认关）" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "action_delete_history", "label": "L2 删除转移记录与下载历史" } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12 }, "content": [{ "component": "VTextarea", "props": { "model": "delete_path_prefixes", "label": "删除文件路径白名单（每行一个前缀，留空=不限）", "rows": 2, "hint": "强烈建议填写，例如 /media /downloads；只删证据链登记的具体文件，绝不删目录", "persistent-hint": true } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VSwitch", "props": { "model": "auto_download_replacement", "label": "延迟后自动下载整季全集（走 MP 下载链）" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VTextField", "props": { "model": "replacement_delay_minutes", "label": "清理后延迟下载（分钟，建议 10~15）", "placeholder": "10" } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VTextField", "props": { "model": "replacement_window_minutes", "label": "替换观察窗时长（分钟，期间冷却防重复清理）", "placeholder": "15" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VTextField", "props": { "model": "recheck_missing_threshold", "label": "整包种子连续检索不到几次则取消", "placeholder": "2" } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VTextarea", "props": { "model": "subscribe_whitelist", "label": "订阅白名单（每行：订阅ID / 剧名 / 媒体ID）", "rows": 3, "hint": "白名单内订阅永不清理", "persistent-hint": true } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 6 }, "content": [{ "component": "VTextarea", "props": { "model": "subscribe_source_blacklist", "label": "订阅来源黑名单（每行一个 username）", "rows": 3, "hint": "用于排除其他插件写入的订阅", "persistent-hint": true } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 4 }, "content": [{ "component": "VSwitch", "props": { "model": "notify_on_hit", "label": "命中规则" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 4 }, "content": [{ "component": "VSwitch", "props": { "model": "notify_on_queue", "label": "进入等待队列" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 4 }, "content": [{ "component": "VSwitch", "props": { "model": "notify_on_execute", "label": "执行清理" } }] }
-          ]
-        },
-        {
-          "component": "VRow",
-          "content": [
-            { "component": "VCol", "props": { "cols": 12, "md": 4 }, "content": [{ "component": "VSwitch", "props": { "model": "notify_on_cancel", "label": "任务取消" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 4 }, "content": [{ "component": "VSwitch", "props": { "model": "notify_on_replacement", "label": "替换/下载新全集" } }] },
-            { "component": "VCol", "props": { "cols": 12, "md": 4 }, "content": [{ "component": "VSwitch", "props": { "model": "onlyonce", "label": "保存后立即扫描一次" } }] }
           ]
         }
       ]
@@ -217,33 +120,6 @@
     "test_mode": true,
     "cron": "0 4 * * *",
     "sites": [],
-    "resolutions": ["2160p", "1080p"],
-    "allow_unknown_resolution": false,
-    "include_rules": "any::Complete|Season\\s*\\d+|全集\nany::全\\s*\\d+\\s*集|整季|全季|合集|完结\nany::S\\d{1,2}\\s+Complete|Season\\s+Pack",
-    "exclude_rules": "any::Sample|预告|花絮|Trailer|Preview\nany::Part\\s*\\d+|Vol\\.?\\s*\\d+|前\\s*\\d+\\s*集\nany::第\\s*\\d+\\s*[-~至]?\\s*\\d*\\s*集|第\\s*\\d+\\s*[-~至]\\s*\\d+\\s*集",
-    "require_include_rule": true,
-    "require_completeness_evidence": false,
-    "follow_subscribe_settings": true,
-    "verify_episode_count": false,
-    "action_delete_subscribe": true,
-    "action_delete_torrent": true,
-    "action_delete_torrent_files": false,
-    "action_delete_local_files": false,
-    "action_delete_media_files": false,
-    "action_delete_history": true,
-    "delete_path_prefixes": "",
-    "subscribe_whitelist": "",
-    "subscribe_source_blacklist": "",
-    "delay_minutes": 15,
-    "recheck_missing_threshold": 2,
-    "replacement_delay_minutes": 10,
-    "replacement_window_minutes": 15,
-    "auto_download_replacement": true,
-    "notify_on_hit": true,
-    "notify_on_queue": true,
-    "notify_on_execute": true,
-    "notify_on_cancel": true,
-    "notify_on_replacement": true,
-    "onlyonce": false
+    "resolution": "any"
   }
 }

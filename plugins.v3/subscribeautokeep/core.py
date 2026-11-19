@@ -1,59 +1,69 @@
 """
-订阅自动保种助手 - 判定引擎（纯 Python，不依赖 MoviePilot 宿主）。
+订阅自动保种助手 - 全集判定引擎（纯 Python，不依赖 MoviePilot 宿主）。
 
-本模块只做「文本 -> 结论」的确定性判断，不访问数据库、不发起网络请求、
-不调用任何宿主 SDK，因此可以在普通 Python 解释器中直接单测。
+只回答一个问题：这条站点种子，是不是「与订阅同一季、目标分辨率、完整一季打包」。
+所有判定规则内置，不再向用户暴露正则配置。顺序不可调换，任一层不过即跳过。
 
-判定链（顺序不可调换，任何一层不通过即跳过，绝不执行清理）：
-    1. 多季 / 跨季排除        —— 防止 S01-S03 被误判为第一季整包
-    2. 单集标识闸门           —— 含 E01 / 1x01 / 第N集 等分集特征则跳过
-    3. 半季 / 分卷排除        —— Part1 / Vol.1 / 前6集 等不完整资源
-    4. 季号解析与订阅季号比对 —— 归一化后必须与订阅 season 严格相等
-    5. 分辨率筛选             —— 站点资源必须落入用户勾选的分辨率
-    6. 排除正则               —— 命中任意一条即跳过（优先级最高）
-    7. 包含正则               —— 至少命中一条（可通过配置关闭该要求）
+判定链：
+    1. 站点过滤
+    2. 宿主 MetaInfo 季集闸门（S01 = 完结季；S01 E40 = 分集）
+    3. 多季 / 跨季排除
+    4. 单集 / 分段包闸门（标题 + 副标题）
+    5. 半季 / 分卷排除
+    6. 季号解析并与订阅季号严格比对
+    7. 分辨率筛选（全部 / 4k / 1080p / 720p）
+    8. 全集证据（宿主识别为完结季，或「全N集 / 完结 / Complete / 全集」文本）
 
-设计原则：宁可漏判，不可误判。本插件的后果包含删除订阅、种子和文件，
-把真整包误判为分集只是「本次不清理」，而把分集/跨季误判为整包会误删。
+设计原则：宁可漏判，不可误判。插件会删订阅、种子和文件，把整包误判成分集
+只是「本次不清理」，把分集或跨季误判成整包则会造成不可逆的误删。
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
-# 常量与字段定义
+# 分辨率：与 MP 原生订阅的下拉完全一致，四档单选
 # ---------------------------------------------------------------------------
 
-#: 用户正则可以指定作用的字段
-RULE_FIELDS: tuple[str, ...] = ("title", "subtitle", "release_group", "note", "any")
-
-FIELD_LABELS: dict[str, str] = {
-    "title": "标题",
-    "subtitle": "副标题",
-    "release_group": "发布组",
-    "note": "备注",
-    "any": "全部字段",
-}
-
-#: 配置页支持的分辨率选项（value 即配置项的值）
-RESOLUTION_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("2160p", "4K / 2160P / UHD"),
-    ("1080p", "1080P / FHD"),
-    ("720p", "720P"),
-    ("480p", "480P / SD"),
+RESOLUTION_CHOICES: tuple[tuple[str, str], ...] = (
+    ("any", "全部"),
+    ("4k", "4k"),
+    ("1080p", "1080p"),
+    ("720p", "720p"),
 )
 
 _RESOLUTION_PATTERNS: dict[str, re.Pattern[str]] = {
     "2160p": re.compile(r"(?<![0-9])(?:2160[pi]|4K|UHD|Ultra\s*HD)(?![0-9])", re.I),
     "1080p": re.compile(r"(?<![0-9])1080[pi](?![0-9])|(?<![A-Za-z])FHD(?![A-Za-z])", re.I),
     "720p": re.compile(r"(?<![0-9])720[pi](?![0-9])", re.I),
-    "480p": re.compile(r"(?<![0-9])480[pi](?![0-9])|(?<![A-Za-z])SD(?![A-Za-z])", re.I),
 }
 
-#: 完整性关键词。命中后从文本中剔除，避免「全12集」被单集正则误杀。
+_RESOLUTION_TARGETS: dict[str, set[str]] = {
+    "any": set(),
+    "4k": {"2160p"},
+    "1080p": {"1080p"},
+    "720p": {"720p"},
+}
+
+
+def resolution_target(choice: str) -> set[str]:
+    """把配置页档位转成内部标准分辨率集合；空集合表示「全部」，不限制。"""
+    return set(_RESOLUTION_TARGETS.get(str(choice or "any").lower(), set()))
+
+
+def detect_resolutions(text: str) -> list[str]:
+    """从标题 / 副标题 / 宿主识别结果中提取标准分辨率。"""
+    return [key for key, pattern in _RESOLUTION_PATTERNS.items() if pattern.search(text or "")]
+
+
+# ---------------------------------------------------------------------------
+# 内置判定正则
+# ---------------------------------------------------------------------------
+
+#: 完整性关键词。命中后从文本中剔除，避免「全40集」被单集正则误杀。
 RE_COMPLETENESS = re.compile(
     r"Complete|全集|全\s*\d+\s*集|全\s*\d+\s*话|整季|全季|完结|合集|整套"
     r"|Pack|Box\s?Set|Full\s+Season|Season\s+Pack",
@@ -61,8 +71,7 @@ RE_COMPLETENESS = re.compile(
 )
 
 #: 集范围写法在 PT 站上通常是「分段打包」，不是完整一季。
-#: 真实站点样例：S01E01-E06 / Lets Go S01 E36-E40 / 副标题「第27-30集」。
-#: 因此这类写法一律按「部分集」排除，绝不能当作整包证据。
+#: 真实样例：S01E01-E06 / S01 E36-E40 / 副标题「第27-30集」。
 RE_EPISODE_RANGE = re.compile(
     r"(?:S\s*\d{1,3}\s*)?E\s*\d{1,3}\s*[-~–—至]\s*(?:S\s*\d{1,3}\s*)?E?\s*\d{1,3}"
     r"|第\s*\d{1,3}\s*[-~–—至]\s*\d{1,3}\s*[集话]"
@@ -70,7 +79,7 @@ RE_EPISODE_RANGE = re.compile(
     re.I,
 )
 
-#: 单集标识族。覆盖 S01E01 / E01 / EP01 / 1x01 / Episode 01 / 第01集 / 01集。
+#: 单集标识族：S01E01 / E01 / EP01 / 1x01 / Episode 01 / 第01集 / 01集
 RE_EPISODE_MARKER = re.compile(
     r"S\s*\d{1,3}\s*E\s*\d{1,3}"
     r"|(?<![A-Za-z0-9])EP?\s*[-_]?\s*\d{1,3}(?![A-Za-z0-9])"
@@ -111,34 +120,7 @@ _CN_DIGITS: dict[str, int] = {
     "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
 }
 
-#: 发布组通常写在标题末尾：xxx-GROUP / xxx@GROUP / [GROUP]
-RE_RELEASE_GROUP = re.compile(r"[-@\[(]([A-Za-z0-9][A-Za-z0-9_\-]{1,20})[\])]?\s*$")
-
-#: 标题里的编码/来源/规格 token，不能误当成发布组（例如 WEB-DL 末尾的 DL）
-RELEASE_GROUP_STOPWORDS = frozenset({
-    "DL", "WEB", "WEBDL", "BLURAY", "BDRIP", "REMUX", "HDTV", "DVDRIP",
-    "H264", "H265", "X264", "X265", "HEVC", "AVC", "AAC", "DDP", "DTS",
-    "HDR", "DV", "SDR", "UHD", "FHD", "HD", "SD", "4K", "1080P", "2160P", "720P",
-    "60FPS", "HFR", "COMPLETE", "PACK", "SEASON", "V2", "REPACK", "PROPER",
-    "NF", "TX", "AMZN", "HMAX", "DSNP", "ATVP", "FRI", "TV", "EP", "S", "E",
-})
-
-#: 内置正则示例（配置页默认值，也是 README 中的示例）。
-#: 真实 PT 站整包标题几乎不带 Complete/Season，完整性信息写在副标题，
-#: 因此默认字段用 any（标题+副标题+发布组+备注），并补齐「全N集 / 完结」。
-DEFAULT_INCLUDE_RULES = "\n".join([
-    r"any::Complete|Season\s*\d+|全集",
-    r"any::全\s*\d+\s*集|整季|全季|合集|完结",
-    r"any::S\d{1,2}\s+Complete|Season\s+Pack",
-])
-DEFAULT_EXCLUDE_RULES = "\n".join([
-    r"any::Sample|预告|花絮|Trailer|Preview",
-    r"any::Part\s*\d+|Vol\.?\s*\d+|前\s*\d+\s*集",
-    r"any::第\s*\d+\s*[-~至]?\s*\d*\s*集|第\s*\d+\s*[-~至]\s*\d+\s*集",
-])
-
-#: 真实 PT 站标题回归样例：(标题, 副标题, 订阅季号, 是否应判定为同季整包命中)。
-#: 正例来自整季打包资源，反例覆盖单集、分段包、部分集、多季合集与无季号电影。
+#: 真实 PT 站标题回归样例：(标题, 副标题, 订阅季号, 是否应判定为同季整包命中)
 SAMPLE_CASES: tuple[tuple[str, str, int, bool], ...] = (
     # ---- 正例：整季打包 ----
     ("The Long Watch S01 2026 2160p WEB-DL DDP5.1 H265-Pure@HDSWEB [热门]",
@@ -208,125 +190,72 @@ SAMPLE_CASES: tuple[tuple[str, str, int, bool], ...] = (
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Rule:
-    """一条用户正则规则：pattern 作用于指定 field。"""
-
-    pattern: str
-    field: str = "title"
-    raw: str = ""
-
-    def compiled(self) -> re.Pattern[str]:
-        """编译正则；非法表达式由 validate_rules 提前拦截。"""
-        return re.compile(self.pattern, re.I)
-
-
 @dataclass
 class TorrentSnapshot:
-    """站点检索到的一条种子，已归一化为判定引擎需要的纯文本字段。"""
+    """归一化后的站点种子，供判定链使用。"""
 
     title: str = ""
     subtitle: str = ""
-    release_group: str = ""
-    note: str = ""
     site_id: Optional[int] = None
     site_name: str = ""
     page_url: str = ""
     enclosure: str = ""
-
-    # ---- 宿主 MetaInfo 已解析的季集信息（优先于文本正则；MP V3 把 S01 视为完结季、S01 E40 视为分集）----
     host_seasons: list[int] = field(default_factory=list)
     host_episodes: list[int] = field(default_factory=list)
     host_begin_episode: Optional[int] = None
-    host_end_episode: Optional[int] = None
-    host_season_episode: str = ""
     host_part: str = ""
+    host_season_episode: str = ""
     host_resolution: str = ""
-    host_release_team: str = ""
-
-    @property
-    def has_host_metadata(self) -> bool:
-        """宿主是否给出了可用的季集解析结果。"""
-        return bool(self.host_seasons or self.host_season_episode or self.host_episodes)
+    host_has_metadata: bool = False
 
     @property
     def any_text(self) -> str:
-        """全部字段拼接后的检索文本。"""
-        return " ".join(
-            x for x in (self.title, self.subtitle, self.release_group, self.note) if x
-        )
-
-    def field_text(self, field_name: str) -> str:
-        """按字段名返回对应文本；any 返回全部字段拼接。"""
-        if field_name == "any":
-            return self.any_text
-        return str(getattr(self, field_name, "") or "")
-
-
-@dataclass
-class RuleMatch:
-    """正则匹配结果。"""
-
-    excluded: bool = False
-    excluded_by: list[str] = field(default_factory=list)
-    included: bool = False
-    included_by: list[str] = field(default_factory=list)
+        """标题 + 副标题 + 宿主识别的分辨率，用于完整性证据与分辨率检测。"""
+        return " ".join(x for x in (self.title, self.subtitle, self.host_resolution) if x)
 
 
 @dataclass
 class Verdict:
-    """单条种子的完整判定结论，checks 用于详细日志输出。"""
+    """一条种子的判定结论，含逐层日志。"""
 
     passed: bool = False
     stage: str = ""
     reason: str = ""
     seasons: list[int] = field(default_factory=list)
-    target_season: Optional[int] = None
     resolutions: list[str] = field(default_factory=list)
     is_full_pack: bool = False
-    has_completeness: bool = False
-    rule_match: RuleMatch = field(default_factory=RuleMatch)
     checks: list[tuple[str, bool, str]] = field(default_factory=list)
 
-    def add_check(self, stage: str, ok: bool, detail: str) -> bool:
-        """记录一层校验；返回 ok 便于链式判断。"""
+    def add_check(self, stage: str, ok: bool, detail: str) -> None:
         self.checks.append((stage, ok, detail))
-        return ok
 
     def fail(self, stage: str, reason: str) -> "Verdict":
-        """标记未通过并返回自身。"""
         self.passed = False
         self.stage = stage
         self.reason = reason
+        self.add_check(stage, False, reason)
         return self
 
     def as_dict(self) -> dict[str, Any]:
-        """转换为可序列化字典，供日志、通知和状态持久化使用。"""
         return {
             "passed": self.passed,
             "stage": self.stage,
             "reason": self.reason,
             "seasons": self.seasons,
-            "target_season": self.target_season,
             "resolutions": self.resolutions,
             "is_full_pack": self.is_full_pack,
-            "has_completeness": self.has_completeness,
-            "excluded_by": self.rule_match.excluded_by,
-            "included_by": self.rule_match.included_by,
-            "checks": [
-                {"stage": s, "ok": ok, "detail": d} for s, ok, d in self.checks
-            ],
+            "checks": [{"stage": s, "ok": o, "detail": d} for s, o, d in self.checks],
         }
 
 
 # ---------------------------------------------------------------------------
-# 文本解析
+# 判定辅助
 # ---------------------------------------------------------------------------
 
 
 def _cn_number_to_int(raw: str) -> Optional[int]:
-    """把「一」「十二」「23」这类季号文本转成整数。"""
-    raw = raw.strip()
+    """把「一 / 十 / 十二」等中文数字转成 int。"""
+    raw = (raw or "").strip()
     if not raw:
         return None
     if raw.isdigit():
@@ -338,89 +267,32 @@ def _cn_number_to_int(raw: str) -> Optional[int]:
         tens = _CN_DIGITS.get(left, 1) if left else 1
         ones = _CN_DIGITS.get(right, 0) if right else 0
         return tens * 10 + ones
-    value = 0
-    for char in raw:
-        if char not in _CN_DIGITS:
-            return None
-        value = value * 10 + _CN_DIGITS[char]
-    return value or None
+    return _CN_DIGITS.get(raw)
 
 
 def extract_seasons(text: str) -> list[int]:
-    """从标题中抽取全部季号并归一化；S1 / S01 / Season 1 / 第一季 均返回 [1]。"""
-    seasons: list[int] = []
+    """提取 S01 / Season 1 / 第1季 / 第一季 形式的所有季号。"""
+    found: list[int] = []
     for match in RE_SEASON_TOKEN.finditer(text or ""):
-        raw = next((g for g in match.groups() if g), None)
-        value = _cn_number_to_int(raw or "")
-        if value is not None and value not in seasons:
-            seasons.append(value)
-    return seasons
+        value = next((g for g in match.groups() if g is not None), None)
+        season = _cn_number_to_int(value or "")
+        if season is not None and season not in found:
+            found.append(season)
+    return found
 
 
 def has_multi_season(text: str) -> bool:
-    """检测多季 / 跨季合集；这类资源必须排除，否则会造成跨季误删。"""
-    if RE_MULTI_SEASON_EXPLICIT.search(text or ""):
-        return True
-    return len(extract_seasons(text or "")) > 1
-
-
-def detect_resolutions(text: str) -> list[str]:
-    """识别文本中出现的分辨率；识别不到返回空列表。"""
-    return [
-        key for key, pattern in _RESOLUTION_PATTERNS.items()
-        if pattern.search(text or "")
-    ]
-
-
-def extract_release_group(title: str) -> str:
-    """从标题末尾提取发布组标识；命中技术词（如 WEB-DL 的 DL）或无结果时返回空串。"""
-    match = RE_RELEASE_GROUP.search(title or "")
-    if not match:
-        return ""
-    group = match.group(1).strip()
-    if group.isdigit() or group.upper() in RELEASE_GROUP_STOPWORDS:
-        return ""
-    return group
+    return bool(RE_MULTI_SEASON_EXPLICIT.search(text or ""))
 
 
 def has_completeness_evidence(text: str) -> bool:
-    """是否存在「完整一季」的文本证据（全N集 / 完结 / Complete 等）。"""
     return bool(RE_COMPLETENESS.search(text or ""))
-
-
-#: 资源标注的完整集数，例如「全40集」「全 8 集」
-RE_TOTAL_EPISODES = re.compile(r"全\s*(\d{1,3})\s*[集话]", re.I)
-
-
-def extract_pack_episode_count(text: str) -> Optional[int]:
-    """从文本中提取资源标注的完整集数；未标注返回 None。"""
-    match = RE_TOTAL_EPISODES.search(text or "")
-    return int(match.group(1)) if match else None
-
-
-def map_resolution(value: str) -> Optional[str]:
-    """把 MP 原生订阅的分辨率值（4k / 1080p / ...）映射到插件选项。"""
-    normalized = (value or "").strip().lower()
-    if normalized in ("4k", "2160p", "2160i", "uhd", "ultrahd"):
-        return "2160p"
-    if normalized in ("1080p", "1080i", "fhd"):
-        return "1080p"
-    if normalized in ("720p", "720i"):
-        return "720p"
-    if normalized in ("480p", "sd"):
-        return "480p"
-    return None
 
 
 def episode_gate(text: str, extra_text: str = "") -> tuple[bool, str]:
     """
-    单集 / 部分集标识闸门，同时检查标题与副标题。
-
-    中文 PT 站的集数信息几乎都写在副标题（第40集 / 第27-30集 / 全40集），
-    只看标题会把分段包误判为整季全集。完整性关键词先剔除，避免「全40集」
-    被 ``\\d+集`` 误判成单集；但「第N集」这类排除信号优先级高于完整性信号。
-
-    :return: (是否为分集或部分集资源, 说明)
+    单集 / 部分集闸门。标题和副标题都要检查：中文 PT 站常把「第27-30集」
+    写在副标题，标题本身看起来和整包一模一样。
     """
     combined = f"{text or ''} {extra_text or ''}"
     cleaned = RE_COMPLETENESS.sub(" ", combined)
@@ -429,242 +301,6 @@ def episode_gate(text: str, extra_text: str = "") -> tuple[bool, str]:
     if RE_EPISODE_MARKER.search(cleaned):
         return True, "命中单集标识（S01E01 / E01 / 1x01 / 第N集 等）"
     return False, "标题与副标题均未发现单集 / 部分集标识"
-
-
-# ---------------------------------------------------------------------------
-# 规则解析与匹配
-# ---------------------------------------------------------------------------
-
-
-def parse_rules(raw: str | Iterable[str]) -> list[Rule]:
-    """
-    解析规则文本，每行一条，格式为 ``字段::正则``。
-
-    - 省略字段时默认 title；以 # 开头的行视为注释。
-    - 正则中允许出现 ``::`` 以外的任意字符（用 partition 只切第一处）。
-    """
-    if isinstance(raw, str):
-        lines: Iterable[str] = raw.splitlines()
-    else:
-        lines = raw
-    rules: list[Rule] = []
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "::" in line:
-            field_name, pattern = line.split("::", 1)
-            field_name = field_name.strip().lower()
-            pattern = pattern.strip()
-        else:
-            field_name, pattern = "title", line
-        if field_name not in RULE_FIELDS:
-            field_name = "title"
-        if not pattern:
-            continue
-        rules.append(Rule(pattern=pattern, field=field_name, raw=line))
-    return rules
-
-
-def validate_rules(rules: Iterable[Rule]) -> list[str]:
-    """校验全部正则的合法性，返回人类可读的错误列表（空列表表示全部合法）。"""
-    errors: list[str] = []
-    for rule in rules:
-        try:
-            re.compile(rule.pattern)
-        except re.error as error:
-            errors.append(f"[{FIELD_LABELS.get(rule.field, rule.field)}] {rule.pattern!r}：{error}")
-    return errors
-
-
-def match_rules(
-    torrent: TorrentSnapshot,
-    include_rules: Iterable[Rule],
-    exclude_rules: Iterable[Rule],
-) -> RuleMatch:
-    """先排除后包含；命中任意排除规则即跳过，命中任意包含规则即通过。"""
-    result = RuleMatch()
-    for rule in exclude_rules:
-        text = torrent.field_text(rule.field)
-        if text and rule.compiled().search(text):
-            result.excluded = True
-            result.excluded_by.append(f"{FIELD_LABELS.get(rule.field, rule.field)}::{rule.pattern}")
-    if result.excluded:
-        return result
-    for rule in include_rules:
-        text = torrent.field_text(rule.field)
-        if text and rule.compiled().search(text):
-            result.included = True
-            result.included_by.append(f"{FIELD_LABELS.get(rule.field, rule.field)}::{rule.pattern}")
-    return result
-
-
-# ---------------------------------------------------------------------------
-# 主判定
-# ---------------------------------------------------------------------------
-
-
-def evaluate(
-    *,
-    subscribe_name: str,
-    subscribe_season: Optional[int],
-    torrent: TorrentSnapshot,
-    allowed_site_ids: Optional[set[int]] = None,
-    allowed_resolutions: Optional[set[str]] = None,
-    allow_unknown_resolution: bool = False,
-    include_rules: Optional[list[Rule]] = None,
-    exclude_rules: Optional[list[Rule]] = None,
-    require_include_rule: bool = True,
-    require_completeness_evidence: bool = False,
-    subscribe_total_episode: Optional[int] = None,
-    verify_episode_count: bool = False,
-) -> Verdict:
-    """
-    对一条站点种子执行完整判定链。
-
-    :param subscribe_name: 订阅名称，仅用于日志
-    :param subscribe_season: 订阅的季号，必须与种子季号严格相等
-    :param torrent: 归一化后的种子文本
-    :param allowed_site_ids: 勾选的站点 ID；None 或空集合表示不限制
-    :param allowed_resolutions: 勾选的分辨率；None 或空集合表示不限制
-    :param include_rules / exclude_rules: 用户正则
-    :param require_include_rule: False 时包含正则降级为可选精筛
-    :param require_completeness_evidence: True 时额外要求出现完整性关键词
-    """
-    verdict = Verdict(target_season=subscribe_season)
-    title = torrent.title or ""
-    # 季集结构化解析只看标题；备注里的 E01-E12 不应触发排除
-    full_text = torrent.any_text
-
-    # 1. 站点过滤
-    if allowed_site_ids:
-        if torrent.site_id is None or int(torrent.site_id) not in allowed_site_ids:
-            return verdict.fail("站点", f"站点 {torrent.site_name or torrent.site_id} 不在勾选范围内")
-        verdict.add_check("站点", True, f"命中勾选站点：{torrent.site_name or torrent.site_id}")
-
-    # 季集结构化解析同时读取标题与副标题：中文 PT 站的集数信息几乎都写在副标题。
-    season_text = f"{title} {torrent.subtitle or ''}"
-
-    # 1.5 宿主 MetaInfo 季集解析优先：MP V3 把 S01 视为完结季、S01 E40 视为分集。
-    # 宿主结论比标题正则更权威；宿主未识别时才回退到文本判定。
-    if torrent.has_host_metadata:
-        if torrent.host_episodes or torrent.host_begin_episode is not None:
-            return verdict.fail(
-                "宿主季集",
-                f"MP 识别为分集/部分集（{torrent.host_season_episode or '含集号'}），不是完结季",
-            )
-        if torrent.host_part:
-            return verdict.fail("宿主季集", f"MP 识别为分段媒体（part={torrent.host_part}）")
-        if len(torrent.host_seasons) > 1:
-            return verdict.fail(
-                "多季排除", f"MP 识别出多季 {torrent.host_seasons}，禁止参与同季判定"
-            )
-        label = torrent.host_season_episode or (
-            f"S{torrent.host_seasons[0]:02d}" if torrent.host_seasons else "S??"
-        )
-        verdict.add_check("宿主季集", True, f"MP 识别为完结季 {label}，无集号")
-    else:
-        verdict.add_check("宿主季集", True, "宿主未给出季集解析，回退到标题正则判定")
-
-    # 2. 多季 / 跨季排除（优先级最高，防止跨季误删）
-    if has_multi_season(season_text):
-        return verdict.fail("多季排除", "识别为多季 / 跨季合集，禁止参与同季判定")
-    verdict.add_check("多季排除", True, "未发现多季 / 跨季特征")
-
-    # 3. 单集 / 部分集闸门（标题 + 副标题）
-    is_episode, gate_note = episode_gate(title, torrent.subtitle)
-    if is_episode:
-        return verdict.fail("单集闸门", gate_note)
-    verdict.add_check("单集闸门", True, gate_note)
-
-    # 4. 半季 / 分卷排除
-    if RE_PARTIAL_PACK.search(season_text):
-        return verdict.fail("完整性", "识别为半季 / 分卷 / 部分集数资源，不是完整一季")
-    verdict.add_check("完整性", True, "未发现半季 / 分卷特征")
-
-    # 5. 季号解析与订阅季号严格比对（宿主解析优先，文本正则兜底）
-    seasons = list(torrent.host_seasons) if torrent.host_seasons else extract_seasons(season_text)
-    verdict.seasons = seasons
-    if not seasons:
-        return verdict.fail("季集校验", "标题中无法解析出季号（S01 / Season 1 / 第1季）")
-    if len(seasons) > 1:
-        return verdict.fail("季集校验", f"标题含多个季号 {seasons}，疑似跨季合集")
-    if subscribe_season is None:
-        return verdict.fail("季集校验", "订阅本身没有季号，无法做同季校验")
-    if seasons[0] != int(subscribe_season):
-        return verdict.fail(
-            "季集校验",
-            f"种子季号 S{seasons[0]:02d} 与订阅季号 S{int(subscribe_season):02d} 不一致，跳过以防跨季误删",
-        )
-    verdict.add_check(
-        "季集校验", True,
-        f"同季校验通过：订阅 S{int(subscribe_season):02d} == 种子 S{seasons[0]:02d}（{subscribe_name}）",
-    )
-    verdict.is_full_pack = True
-
-    # 6. 分辨率筛选（标题/副标题文本 + 宿主识别的 resource_pix）
-    resolutions = detect_resolutions(full_text)
-    if torrent.host_resolution:
-        for item in detect_resolutions(torrent.host_resolution):
-            if item not in resolutions:
-                resolutions.append(item)
-    verdict.resolutions = resolutions
-    if allowed_resolutions:
-        if not resolutions:
-            if not allow_unknown_resolution:
-                return verdict.fail("分辨率", "未标注分辨率，按保守策略跳过")
-            verdict.add_check("分辨率", True, "未标注分辨率，已按配置放行")
-        elif not set(resolutions) & allowed_resolutions:
-            return verdict.fail(
-                "分辨率",
-                f"资源分辨率 {','.join(resolutions)} 不在勾选范围 {','.join(sorted(allowed_resolutions))}",
-            )
-        else:
-            verdict.add_check("分辨率", True, f"命中分辨率：{','.join(resolutions)}")
-
-    # 7. 完整性证据（可选硬要求）
-    verdict.has_completeness = has_completeness_evidence(full_text)
-    if require_completeness_evidence and not verdict.has_completeness:
-        return verdict.fail("完整性", "未发现 Complete / 全集 / 集范围 等整包证据")
-    verdict.add_check(
-        "完整性", True,
-        "存在整包文本证据" if verdict.has_completeness else "无显式整包关键词，依赖包含正则确认",
-    )
-
-    # 7.5 集数一致性（可选）：拿订阅的「总集数」核对资源标注的「全N集」。
-    # 例如订阅总集数 8 却搜到「全40集」，说明并非同一季/同一版本，跳过更安全。
-    if verify_episode_count and subscribe_total_episode:
-        pack_count = extract_pack_episode_count(full_text)
-        if pack_count is not None and pack_count != int(subscribe_total_episode):
-            return verdict.fail(
-                "集数校验",
-                f"资源标注全{pack_count}集，与订阅总集数 {subscribe_total_episode} 不符，跳过",
-            )
-        verdict.add_check(
-            "集数校验", True,
-            f"集数一致或资源未标注（资源 {pack_count or '未标注'} / 订阅 {subscribe_total_episode}）",
-        )
-
-    # 8. 排除正则（优先级高于包含正则）
-    rule_match = match_rules(torrent, include_rules or [], exclude_rules or [])
-    verdict.rule_match = rule_match
-    if rule_match.excluded:
-        return verdict.fail("排除规则", f"命中排除正则：{rule_match.excluded_by[0]}")
-    verdict.add_check("排除规则", True, "未命中任何排除正则")
-
-    # 9. 包含正则
-    if require_include_rule and not rule_match.included:
-        return verdict.fail("包含规则", "未命中任何包含正则")
-    verdict.add_check(
-        "包含规则", True,
-        f"命中包含正则：{rule_match.included_by[0]}" if rule_match.included
-        else "包含正则为可选，未配置或未命中亦放行",
-    )
-
-    verdict.passed = True
-    verdict.stage = "命中"
-    verdict.reason = f"同季整包校验通过（S{seasons[0]:02d}），分辨率 {','.join(resolutions) or '未标注'}"
-    return verdict
 
 
 def validate_cron(expression: str) -> tuple[bool, str]:
@@ -688,33 +324,157 @@ def _to_int(value: Any) -> Optional[int]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# 主判定
+# ---------------------------------------------------------------------------
+
+
+def evaluate(
+    *,
+    subscribe_season: Optional[int],
+    torrent: TorrentSnapshot,
+    allowed_site_ids: Optional[set[int]] = None,
+    resolution: str = "any",
+) -> Verdict:
+    """
+    判定一条种子是否为「同季 + 目标分辨率 + 完整一季打包」。
+
+    :param subscribe_season: MP 原生订阅的指定季号，必须与种子季号严格相等
+    :param torrent: 归一化后的种子文本
+    :param allowed_site_ids: 勾选的站点 ID；None 或空集合表示不限制
+    :param resolution: any / 4k / 1080p / 720p
+    """
+    verdict = Verdict()
+    title = torrent.title or ""
+    full_text = torrent.any_text
+    season_text = f"{title} {torrent.subtitle or ''}"
+
+    # 1. 站点过滤
+    if allowed_site_ids:
+        if torrent.site_id is None or int(torrent.site_id) not in allowed_site_ids:
+            return verdict.fail("站点", f"站点 {torrent.site_name or torrent.site_id} 不在勾选范围内")
+        verdict.add_check("站点", True, f"命中勾选站点：{torrent.site_name or torrent.site_id}")
+
+    # 2. 宿主季集优先：MP V3 把 S01 视为完结季、S01 E40 视为分集
+    if torrent.host_has_metadata:
+        if torrent.host_episodes or torrent.host_begin_episode is not None:
+            return verdict.fail(
+                "宿主季集",
+                f"MP 识别为分集/部分集（{torrent.host_season_episode or '含集号'}），不是完结季",
+            )
+        if torrent.host_part:
+            return verdict.fail("宿主季集", f"MP 识别为分段媒体（part={torrent.host_part}）")
+        if len(torrent.host_seasons) > 1:
+            return verdict.fail("多季排除", f"MP 识别出多季 {torrent.host_seasons}，禁止参与同季判定")
+        label = torrent.host_season_episode or (
+            f"S{torrent.host_seasons[0]:02d}" if torrent.host_seasons else "S??"
+        )
+        verdict.add_check("宿主季集", True, f"MP 识别为完结季 {label}，无集号")
+    else:
+        verdict.add_check("宿主季集", True, "宿主未给出季集解析，回退到标题正则判定")
+
+    # 3. 多季 / 跨季排除（优先级最高，防止跨季误删）
+    if has_multi_season(season_text):
+        return verdict.fail("多季排除", "识别为多季 / 跨季合集，禁止参与同季判定")
+    verdict.add_check("多季排除", True, "未发现多季 / 跨季特征")
+
+    # 4. 单集 / 部分集闸门（标题 + 副标题）
+    is_episode, gate_note = episode_gate(title, torrent.subtitle)
+    if is_episode:
+        return verdict.fail("单集闸门", gate_note)
+    verdict.add_check("单集闸门", True, gate_note)
+
+    # 5. 半季 / 分卷排除
+    if RE_PARTIAL_PACK.search(season_text):
+        return verdict.fail("完整性", "识别为半季 / 分卷 / 部分集数资源，不是完整一季")
+    verdict.add_check("完整性", True, "未发现半季 / 分卷特征")
+
+    # 6. 季号解析与订阅季号严格比对（宿主解析优先，文本正则兜底）
+    seasons = list(torrent.host_seasons) if torrent.host_seasons else extract_seasons(season_text)
+    verdict.seasons = seasons
+    if not seasons:
+        return verdict.fail("季集校验", "标题中无法解析出季号（S01 / Season 1 / 第1季）")
+    if len(seasons) > 1:
+        return verdict.fail("季集校验", f"标题含多个季号 {seasons}，疑似跨季合集")
+    if subscribe_season is None:
+        return verdict.fail("季集校验", "订阅本身没有季号，无法做同季校验")
+    if seasons[0] != int(subscribe_season):
+        return verdict.fail(
+            "季集校验",
+            f"种子季号 S{seasons[0]:02d} 与订阅季号 S{int(subscribe_season):02d} 不一致，跳过以防跨季误删",
+        )
+    verdict.add_check(
+        "季集校验", True,
+        f"同季校验通过：订阅 S{int(subscribe_season):02d} == 种子 S{seasons[0]:02d}",
+    )
+
+    # 7. 分辨率筛选（标题 / 副标题文本 + 宿主识别的 resource_pix）
+    resolutions = detect_resolutions(full_text)
+    verdict.resolutions = resolutions
+    targets = resolution_target(resolution)
+    if not targets:
+        verdict.add_check("分辨率", True, f"全部（不限制），识别到 {','.join(resolutions) or '未标注'}")
+    elif not resolutions:
+        return verdict.fail("分辨率", "资源未标注分辨率，按保守策略跳过")
+    elif not set(resolutions) & targets:
+        return verdict.fail(
+            "分辨率",
+            f"资源分辨率 {','.join(resolutions)} 与目标 {','.join(sorted(targets))} 不符",
+        )
+    else:
+        verdict.add_check("分辨率", True, f"命中目标分辨率：{','.join(resolutions)}")
+
+    # 8. 全集证据：宿主识别为完结季，或文本带「全N集 / 完结 / Complete / 全集」
+    # 没有包含正则之后，这一步是防止把「干净标题的分段包」当成整包的最后一道闸门。
+    host_pack = torrent.host_has_metadata and bool(torrent.host_seasons) and not torrent.host_episodes
+    text_pack = has_completeness_evidence(full_text)
+    if not (host_pack or text_pack):
+        return verdict.fail(
+            "全集证据",
+            "MP 未识别为完结季，且标题/副标题没有「全N集 / 完结 / Complete / 全集」等整包证据",
+        )
+    verdict.is_full_pack = True
+    verdict.add_check(
+        "全集证据", True,
+        "MP 识别为完结季" if host_pack else "文本含整包关键词",
+    )
+
+    verdict.passed = True
+    verdict.stage = "命中"
+    verdict.reason = (
+        f"同季整季打包 S{seasons[0]:02d}，分辨率 {','.join(resolutions) or '未标注'}，"
+        f"目标档位 {resolution}"
+    )
+    return verdict
+
+
+# ---------------------------------------------------------------------------
+# 宿主对象 -> 快照
+# ---------------------------------------------------------------------------
+
+
 def build_snapshot_from_torrent(torrent: Any, context: Any = None) -> TorrentSnapshot:
     """
     把宿主 ``TorrentInfo`` / ``Context`` 转成 TorrentSnapshot。
 
-    MP V3 搜索结果已经用 ``Context.meta_info`` 完成季集识别：
-    ``S01`` 表示完结季（无集号），``S01 E40`` 表示分集（有 begin_episode）。
-    本函数优先抽取这份公开 Schema 的解析结果，插件正则只作为宿主未识别时的兜底。
+    MP V3 搜索结果已用 ``Context.meta_info`` 完成季集识别：``S01`` 表示完结季
+    （无集号），``S01 E40`` 表示分集（有 begin_episode / episode_list）。
+    优先采信这份公开 Schema 的解析结果，插件正则只作为宿主未识别时的兜底。
 
     全程使用 getattr，避免插件绑定宿主内部 ORM / Schema 的具体版本。
     """
     def g(name: str, default: Any = "") -> Any:
         return getattr(torrent, name, None) or default
 
-    title = str(g("title"))
-    # 站点常在标题尾部追加 [热门] / [免费] 等展示标签，先剥离再提取发布组
-    clean_title = re.sub(r"\s*\[[^\]]*\]\s*$", "", title).strip()
-    labels = g("labels", []) or []
-    labels_text = " ".join(str(x) for x in labels) if isinstance(labels, (list, tuple, set)) else str(labels)
-
     meta = getattr(context, "meta_info", None) if context is not None else None
-    def mg(name: str, default: Any = None) -> Any:  # noqa: E306
+
+    def mg(name: str, default: Any = None) -> Any:
         return getattr(meta, name, default) if meta is not None else default
 
     # 季号：只有宿主明确解析出 begin_season 才采信，避免 TV 默认 [1] 造成误判
-    host_seasons: list[int] = []
     begin_season = _to_int(mg("begin_season"))
     end_season = _to_int(mg("end_season"))
+    host_seasons: list[int] = []
     if begin_season is not None:
         last = end_season if end_season is not None and end_season >= begin_season else begin_season
         host_seasons = list(range(begin_season, min(last, begin_season + 30) + 1))
@@ -725,16 +485,12 @@ def build_snapshot_from_torrent(torrent: Any, context: Any = None) -> TorrentSna
     if isinstance(raw_episodes, (list, tuple, set)):
         host_episodes = [v for v in (_to_int(x) for x in raw_episodes) if v is not None]
     begin_episode = _to_int(mg("begin_episode"))
-    host_end_episode = _to_int(mg("end_episode"))
     if not host_episodes and begin_episode is not None:
         host_episodes = [begin_episode]
 
-    team = str(mg("resource_team") or "")
     return TorrentSnapshot(
-        title=title,
+        title=str(g("title")),
         subtitle=str(g("description")),
-        release_group=extract_release_group(clean_title or title) or team,
-        note=" ".join(x for x in (labels_text, str(g("volume_factor")), str(g("category"))) if x),
         site_id=g("site", None),
         site_name=str(g("site_name")),
         page_url=str(g("page_url")),
@@ -742,9 +498,8 @@ def build_snapshot_from_torrent(torrent: Any, context: Any = None) -> TorrentSna
         host_seasons=host_seasons,
         host_episodes=host_episodes,
         host_begin_episode=begin_episode,
-        host_end_episode=host_end_episode,
-        host_season_episode=str(mg("season_episode") or ""),
         host_part=str(mg("part") or ""),
+        host_season_episode=str(mg("season_episode") or ""),
         host_resolution=str(mg("resource_pix") or ""),
-        host_release_team=team,
+        host_has_metadata=begin_season is not None,
     )

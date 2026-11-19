@@ -1,19 +1,20 @@
 {
   "id": "SubscribeAutoKeep",
   "name": "订阅自动保种助手",
-  "description": "定时检索勾选站点的同季整季打包资源，按分辨率/正则/季集校验命中后延迟清理原生电视剧订阅及其种子、文件与转移记录，再下载整包以便 MP 正常转移刮削。",
-  "version": "3.0.0",
+  "description": "官方订阅追剧时，发现勾选站点的同季、目标分辨率整季全集，就清理该订阅及其种子/文件/转移记录/媒体库文件，再下载整包以便保种与刮削。",
+  "version": "3.1.0",
   "icon": "Moviepilot_A.png",
   "author": "hmily",
   "author_url": "https://github.com/hmily91/MoviePilot-Plugins",
   "level": 1,
-  "labels": "订阅,保种,整季打包,定时清理",
+  "labels": "订阅,保种,整季全集,定时清理",
   "system_version": ">=3.0.0",
   "v3": true,
-  "has_page": true,
+  "has_page": false,
   "listen_events": [],
   "homepage": "https://github.com/hmily91/MoviePilot-Plugins/tree/main/plugins.v3/subscribeautokeep",
   "history": {
+    "v3.1.0": "大幅精简：配置页收敛为启用/Cron/站点/分辨率/测试模式 5 项；分辨率改为与 MP 订阅一致的「全部/4k/1080p/720p」四档单选；移除包含/排除正则、字段选择、正则测试、跟随订阅设置、集数校验、白名单、路径白名单、5 个通知开关与 6 个删除开关；删除范围固定为订阅+种子及种子文件+转移记录+媒体库文件；删前 15 分钟等待复检与删后 10 分钟自动下载整季全集固化为内置流程；全集判定改用内置证据链（宿主 MetaInfo 优先 + 整包关键词），不再依赖用户正则。",
     "v3.0.0": "首次发布：V3 稳定 SDK 定时任务、宿主 MetaInfo 季集识别优先、真实 PT 站标题回归用例、删前稳定性等待与删后替换观察窗、分级清理与证据链、测试模式与正则校验。"
   },
   "config": {
@@ -21,19 +22,7 @@
     "test_mode": true,
     "cron": "0 4 * * *",
     "sites": [],
-    "resolutions": ["2160p", "1080p"],
-    "delay_minutes": 15,
-    "replacement_delay_minutes": 10,
-    "replacement_window_minutes": 15,
-    "auto_download_replacement": true,
-    "include_rules": "any::Complete|Season\\s*\\d+|全集\nany::全\\s*\\d+\\s*集|整季|全季|合集|完结\nany::S\\d{1,2}\\s+Complete|Season\\s+Pack",
-    "exclude_rules": "any::Sample|预告|花絮|Trailer|Preview\nany::Part\\s*\\d+|Vol\\.?\\s*\\d+|前\\s*\\d+\\s*集\nany::第\\s*\\d+\\s*[-~至]?\\s*\\d*\\s*集|第\\s*\\d+\\s*[-~至]\\s*\\d+\\s*集",
-    "action_delete_subscribe": true,
-    "action_delete_torrent": true,
-    "action_delete_torrent_files": false,
-    "action_delete_local_files": false,
-    "action_delete_media_files": false,
-    "action_delete_history": true
+    "resolution": "any"
   },
   "schema": {
     "type": "object",
@@ -41,13 +30,13 @@
       "enabled": {
         "type": "boolean",
         "title": "启用插件",
-        "description": "开启后注册 Cron 扫描与队列复检服务。",
+        "description": "开启后注册 Cron 扫描与每分钟队列复检服务。",
         "default": false
       },
       "test_mode": {
         "type": "boolean",
         "title": "测试模式",
-        "description": "只打印日志并推送预警，不入队、不删除、不下载。默认开启，核对证据链后再关闭。",
+        "description": "只打印日志（含证据链）并推送预警，不入队、不删除、不下载。默认开启。",
         "default": true
       },
       "cron": {
@@ -63,30 +52,12 @@
         "items": { "type": "integer" },
         "default": []
       },
-      "resolutions": {
-        "type": "array",
-        "title": "目标分辨率",
-        "description": "可选 2160p / 1080p / 720p / 480p，多选。",
-        "items": { "type": "string" },
-        "default": ["2160p", "1080p"]
-      },
-      "delay_minutes": {
-        "type": "integer",
-        "title": "删前稳定性等待（分钟）",
-        "description": "命中后持续复检打包种子是否仍可检索到，消失即取消清理。",
-        "default": 15
-      },
-      "replacement_delay_minutes": {
-        "type": "integer",
-        "title": "清理后延迟下载（分钟）",
-        "description": "旧资源清空后延迟多久把整季全集交给 MP 下载链，建议 10~15。",
-        "default": 10
-      },
-      "auto_download_replacement": {
-        "type": "boolean",
-        "title": "自动下载整季全集",
-        "description": "关闭则只推送标题/页面/下载链接，由用户手动下载。",
-        "default": true
+      "resolution": {
+        "type": "string",
+        "title": "分辨率",
+        "description": "与 MP 原生订阅一致的四档单选：any=全部（不限制）/ 4k / 1080p / 720p。",
+        "enum": ["any", "4k", "1080p", "720p"],
+        "default": "any"
       }
     }
   }

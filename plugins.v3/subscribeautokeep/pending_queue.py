@@ -1,11 +1,12 @@
 """
 订阅自动保种助手 - 延迟等待队列。
 
-命中全部规则后不立即删除，先进入等待队列。等待期间由定时任务持续复检：
-    - 打包种子是否仍能在勾选站点检索到；
-    - 打包种子是否仍然满足同季整包校验；
-    - 「新全集已就绪」门槛（可选）是否满足。
-任一条件在等待期内失效即取消任务，避免刚发布不稳定资源误触发清理。
+命中同季整季全集后不立即删除，先进入 15 分钟等待队列。等待期间由定时任务
+每分钟复检该种子是否仍能在勾选站点检索到；连续两次检索不到即取消任务，
+避免刚发布的不稳定资源误触发删除。
+
+清理完成后任务转为 cooling（替换观察窗），延迟 10 分钟下载整季全集，
+窗口结束标记 done。
 
 队列状态通过宿主基类的 save_data / get_data 持久化，天然支持虚拟分身隔离，
 本模块本身不访问数据库，只负责纯状态结构与序列化，便于单测。
@@ -44,7 +45,6 @@ class PendingTask:
     torrent_page_url: str = ""
     torrent_enclosure: str = ""
     resolutions: list[str] = field(default_factory=list)
-    matched_include: list[str] = field(default_factory=list)
     verdict_detail: dict[str, Any] = field(default_factory=dict)
     evidence: dict[str, Any] = field(default_factory=dict)
     created_ts: float = 0.0
@@ -124,7 +124,6 @@ class PendingQueue:
             existing.torrent_page_url = task.torrent_page_url
             existing.torrent_enclosure = task.torrent_enclosure
             existing.resolutions = task.resolutions
-            existing.matched_include = task.matched_include
             existing.verdict_detail = task.verdict_detail
             return False
         self._tasks[task.task_id] = task

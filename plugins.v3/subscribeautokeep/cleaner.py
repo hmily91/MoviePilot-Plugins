@@ -1,5 +1,5 @@
 """
-订阅自动保种助手 - 证据链收集与分级清理（宿主交互层）。
+订阅自动保种助手 - 证据链收集与清理（宿主交互层）。
 
 本模块是插件中唯一接触 MoviePilot 宿主业务数据的地方，严格遵守 V3 边界：
     - 宿主订阅只读走 ``SubscribeOper``，删除走 ``SubscribeOper.delete``；
@@ -11,9 +11,13 @@
 所有宿主调用均为「延迟导入 + 独立 try/except + getattr 兜底」，某个能力在
 不同 V3 小版本间缺失时只记录告警，不会让插件崩溃或中断后续清理步骤。
 
+清理范围固定为四件套，不再提供逐个开关：
+    L0 订阅任务 → L1 下载器种子（含种子文件）→ L1b/L3 具体文件
+    → L2 转移记录与下载历史。
+
 安全约束（硬性）：
     - 只删除证据链里明确登记的**具体文件**，绝不递归删除目录；
-    - 删除前校验路径深度与可选前缀白名单，拒绝根目录和过短路径；
+    - 删除前校验路径深度，拒绝根目录和过短路径；
     - 测试模式下本模块只输出证据链，不产生任何写操作。
 """
 
@@ -103,7 +107,6 @@ class EvidenceBuilder:
         season = _attr(subscribe, "season")
         media_source = _text(_attr(subscribe, "media_source"))
         media_id = _text(_attr(subscribe, "media_id"))
-        keyword = _text(_attr(subscribe, "keyword"))
 
         evidence: dict[str, Any] = {
             "subscribe": {
@@ -113,7 +116,7 @@ class EvidenceBuilder:
                 "type": _text(_attr(subscribe, "type")),
                 "media_source": media_source,
                 "media_id": media_id,
-                "keyword": keyword,
+                "keyword": _text(_attr(subscribe, "keyword")),
                 "username": _text(_attr(subscribe, "username")),
             },
             "hashes": [],
@@ -163,9 +166,7 @@ class EvidenceBuilder:
         if name:
             transfer_rows += self._call(transfer_oper, "get_by_title", name)
             if hasattr(download_oper, "get_last_by"):
-                download_rows += self._call(
-                    download_oper, "get_last_by", title=name,
-                )
+                download_rows += self._call(download_oper, "get_last_by", title=name)
 
         # 3) 汇总首轮哈希，再按哈希补齐关联记录
         for row in transfer_rows:
@@ -209,7 +210,7 @@ class EvidenceBuilder:
             if path and path not in evidence["download_paths"]:
                 evidence["download_paths"].append(path)
 
-        # 5) 查询下载器中仍在的种子（只读，用于证据链与就绪确认）
+        # 5) 查询下载器中仍在的种子（只读，用于日志与证据链）
         if evidence["hashes"]:
             try:
                 from app.chain.download import DownloadChain
@@ -228,10 +229,10 @@ class EvidenceBuilder:
 
         if not evidence["hashes"]:
             evidence["warnings"].append(
-                "未找到该订阅关联的下载 hash，L1 种子清理将被跳过（不会盲目按标题匹配）"
+                "未找到该订阅关联的下载 hash，种子清理将被跳过（不会盲目按标题匹配）"
             )
         if not evidence["media_paths"]:
-            evidence["warnings"].append("未找到媒体库具体文件，L3 将被跳过")
+            evidence["warnings"].append("未找到媒体库具体文件，媒体库文件删除将跳过")
 
         self._log(
             f"[订阅保种] 证据链：订阅 #{sub_id} {name} S{season or '?'} | "
@@ -249,7 +250,7 @@ class EvidenceBuilder:
 
 
 class CleanupExecutor:
-    """按 L0 → L1 → L3 → L2 顺序执行分级清理，逐步记录结果。"""
+    """按 L0 → L1 → L1b → L3 → L2 顺序执行全套清理，逐步记录结果。"""
 
     def __init__(self, log: Log) -> None:
         self._log = log
@@ -262,33 +263,18 @@ class CleanupExecutor:
             result["errors"].append(f"{step}：{detail}")
             result["ok"] = False
 
-    def _allowed(self, path: str, prefixes: list[str]) -> bool:
-        """若配置了路径前缀白名单，则只删除落在白名单内的文件。"""
-        if not prefixes:
-            return True
-        normalized = os.path.normcase(os.path.normpath(path))
-        return any(
-            os.path.normcase(os.path.normpath(p)) and
-            normalized.startswith(os.path.normcase(os.path.normpath(p)))
-            for p in prefixes
-        )
-
     def _delete_files(
         self,
         paths: Iterable[str],
-        prefixes: list[str],
         label: str,
         result: dict[str, Any],
     ) -> int:
-        """逐个删除具体文件；目录、越界路径、白名单外路径全部跳过。"""
+        """逐个删除具体文件；目录、越界路径全部跳过，绝不递归。"""
         deleted = 0
         for raw in paths:
             path = _is_file_path(raw)
             if not path:
                 self._log(f"[订阅保种]   {label} 跳过（非具体文件）：{raw}")
-                continue
-            if not self._allowed(path, prefixes):
-                self._log(f"[订阅保种]   {label} 跳过（不在路径白名单）：{path}")
                 continue
             try:
                 Path(path).unlink(missing_ok=True)
@@ -298,17 +284,11 @@ class CleanupExecutor:
                 self._step(result, f"{label}删除 {os.path.basename(path)}", False, str(error))
         return deleted
 
-    def run(
-        self,
-        evidence: dict[str, Any],
-        actions: dict[str, Any],
-        test_mode: bool = False,
-    ) -> dict[str, Any]:
+    def run(self, evidence: dict[str, Any], test_mode: bool = False) -> dict[str, Any]:
         """
-        执行清理。
+        执行全套清理。
 
         :param evidence: EvidenceBuilder.build 的产物
-        :param actions: 分级动作开关与路径白名单
         :param test_mode: True 时只输出证据链，不产生任何写操作
         """
         sub = evidence.get("subscribe", {})
@@ -325,23 +305,17 @@ class CleanupExecutor:
 
         if test_mode:
             self._log(
-                "[订阅保种] 【测试模式】以下动作均不会执行："
-                f"删订阅={actions.get('delete_subscribe')} / "
-                f"删种子={actions.get('delete_torrent')} / "
-                f"删种子文件={actions.get('delete_torrent_files')} / "
-                f"删本地文件={actions.get('delete_local_files')} / "
-                f"删媒体库文件={actions.get('delete_media_files')} / "
-                f"删历史记录={actions.get('delete_history')}"
+                "[订阅保种] 【测试模式】以下动作均不会执行：删订阅 / 删种子及种子文件 / "
+                "删下载侧文件 / 删媒体库文件 / 删转移记录与下载历史"
             )
             self._step(result, "测试模式", True, "仅输出证据链，未进入删除流程")
             return result
 
-        prefixes = [p.strip() for p in (actions.get("path_prefixes") or []) if p and p.strip()]
         hashes: list[str] = list(evidence.get("hashes") or [])
         sub_id = sub.get("id")
 
         # L0：先删除订阅，避免清理过程中宿主再次触发该订阅的搜索与补下
-        if actions.get("delete_subscribe") and sub_id is not None:
+        if sub_id is not None:
             try:
                 from app.db.oper.subscribe import SubscribeOper
 
@@ -350,63 +324,60 @@ class CleanupExecutor:
             except Exception as error:
                 self._step(result, "L0 删除订阅", False, str(error))
 
-        # L1：通过宿主稳定下载链删除种子（qBittorrent / Transmission 均由宿主适配）
-        if actions.get("delete_torrent") and hashes:
+        # L1：通过宿主稳定下载链删除种子，同时让下载器删除种子文件
+        # qBittorrent / Transmission 均由宿主适配，插件不直接连下载器
+        if hashes:
             try:
                 from app.chain.download import DownloadChain
 
                 chain = DownloadChain()
-                delete_file = bool(actions.get("delete_torrent_files"))
-                kwargs: dict[str, Any] = {"hashs": hashes, "delete_file": delete_file}
+                kwargs: dict[str, Any] = {"hashs": hashes, "delete_file": True}
                 downloaders = evidence.get("downloaders") or []
                 if len(downloaders) == 1:
                     kwargs["downloader"] = downloaders[0]
                 chain.remove_torrents(**kwargs)
                 self._step(
-                    result, "L1 删除种子", True,
-                    f"已提交 {len(hashes)} 个 hash，下载器删文件={delete_file}",
+                    result, "L1 删除种子及种子文件", True,
+                    f"已提交 {len(hashes)} 个 hash，下载器同步删文件",
                 )
             except Exception as error:
-                self._step(result, "L1 删除种子", False, str(error))
+                self._step(result, "L1 删除种子及种子文件", False, str(error))
 
-        # L1b：下载目录残留文件（默认关闭；绝不删目录）
-        if actions.get("delete_local_files"):
-            count = self._delete_files(
-                evidence.get("download_paths") or [], prefixes, "L1b 下载文件", result
-            )
-            self._step(result, "L1b 下载文件", True, f"已删除 {count} 个文件")
+        # L1b：下载目录残留文件（只删证据链登记的具体文件）
+        count = self._delete_files(
+            evidence.get("download_paths") or [], "L1b 下载侧文件", result
+        )
+        self._step(result, "L1b 下载侧文件", True, f"已删除 {count} 个文件")
 
-        # L3：媒体库文件（默认关闭，风险最高，只删证据链登记的具体文件）
-        if actions.get("delete_media_files"):
-            count = self._delete_files(
-                evidence.get("media_paths") or [], prefixes, "L3 媒体库文件", result
-            )
-            self._step(result, "L3 媒体库文件", True, f"已删除 {count} 个文件")
+        # L3：媒体库文件（只删证据链登记的具体文件）
+        count = self._delete_files(
+            evidence.get("media_paths") or [], "L3 媒体库文件", result
+        )
+        self._step(result, "L3 媒体库文件", True, f"已删除 {count} 个文件")
 
         # L2：转移记录与下载历史
-        if actions.get("delete_history"):
-            try:
-                from app.db.oper.downloadhistory import DownloadHistoryOper
-                from app.db.oper.transferhistory import TransferHistoryOper
+        try:
+            from app.db.oper.downloadhistory import DownloadHistoryOper
+            from app.db.oper.transferhistory import TransferHistoryOper
 
-                transfer_oper = TransferHistoryOper()
-                for history_id in evidence.get("transfer_history_ids") or []:
-                    try:
-                        transfer_oper.delete(int(history_id))
-                    except Exception as error:
-                        self._step(result, f"L2 转移记录 #{history_id}", False, str(error))
-                download_oper = DownloadHistoryOper()
-                for history_id in evidence.get("download_history_ids") or []:
-                    try:
-                        download_oper.delete_history(int(history_id))
-                    except Exception as error:
-                        self._step(result, f"L2 下载历史 #{history_id}", False, str(error))
-                self._step(
-                    result, "L2 历史记录", True,
-                    f"转移记录 {len(evidence.get('transfer_history_ids') or [])} 条 / "
-                    f"下载历史 {len(evidence.get('download_history_ids') or [])} 条",
-                )
-            except Exception as error:
-                self._step(result, "L2 历史记录", False, str(error))
+            transfer_oper = TransferHistoryOper()
+            for history_id in evidence.get("transfer_history_ids") or []:
+                try:
+                    transfer_oper.delete(int(history_id))
+                except Exception as error:
+                    self._step(result, f"L2 转移记录 #{history_id}", False, str(error))
+            download_oper = DownloadHistoryOper()
+            for history_id in evidence.get("download_history_ids") or []:
+                try:
+                    download_oper.delete_history(int(history_id))
+                except Exception as error:
+                    self._step(result, f"L2 下载历史 #{history_id}", False, str(error))
+            self._step(
+                result, "L2 历史记录", True,
+                f"转移记录 {len(evidence.get('transfer_history_ids') or [])} 条 / "
+                f"下载历史 {len(evidence.get('download_history_ids') or [])} 条",
+            )
+        except Exception as error:
+            self._step(result, "L2 历史记录", False, str(error))
 
         return result
