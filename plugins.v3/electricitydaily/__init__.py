@@ -74,9 +74,9 @@ class ElectricityDaily(_PluginBase):
     plugin_name = "电费日报"
     plugin_desc = "每日自动登录网上国网，推送用电量、账户余额与阶梯电量剩余。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.0"
-    plugin_author = "workbuddy"
-    author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
+    plugin_version = "1.0.1"
+    plugin_author = "hmily"
+    author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "electricitydaily_"
     plugin_order = 50
     auth_level = 1
@@ -182,79 +182,91 @@ class ElectricityDaily(_PluginBase):
         }]
 
     # ── 页面 ────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _col(*components: dict, cols: int = 12, md: int | None = None) -> dict:
+        """把若干控件包进 VCol，避免 VForm 子控件因缺少栅格容器而重叠。"""
+        props: dict[str, Any] = {"cols": cols}
+        if md is not None:
+            props["md"] = md
+        return {"component": "VCol", "props": props, "content": list(components)}
+
+    @staticmethod
+    def _row(*columns: dict) -> dict:
+        return {"component": "VRow", "content": list(columns)}
+
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
+        notice = {
+            "component": "VAlert",
+            "props": {
+                "type": "info",
+                "variant": "tonal",
+                "text": "密码只用于生成登录摘要，保存后明文立即从配置中清除。"
+                        "登录凭据请用 MoviePilot 已配置的通知渠道接收，插件不另建推送通道。",
+            },
+        }
+        enabled = {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}
+        notify_on_error = {
+            "component": "VSwitch",
+            "props": {"model": "notify_on_error", "label": "登录或接口失败时推送错误说明"},
+        }
+        username = {
+            "component": "VTextField",
+            "props": {
+                "model": "username",
+                "label": "国网登录账号（手机号）",
+                "hint": "与网上国网 App 登录手机号一致",
+            },
+        }
+        password = {
+            "component": "VTextField",
+            "props": {
+                "model": "password",
+                "label": "国网登录密码",
+                "type": "password",
+                "hint": "仅在新填或改密时需要；保存后清空，不会再显示明文",
+                "clearable": True,
+            },
+        }
+        alt_account = {
+            "component": "VTextField",
+            "props": {
+                "model": "alt_account",
+                "label": "备用登录标识（选填）",
+                "hint": "登记在国网的邮箱；主标识被限流时自动尝试一次",
+                "clearable": True,
+            },
+        }
+        cons_no = {
+            "component": "VTextField",
+            "props": {
+                "model": "cons_no",
+                "label": "只推送指定户号（选填）",
+                "hint": "留空则推送账号下全部居民户号",
+                "clearable": True,
+            },
+        }
+        cron = {
+            "component": "VTextField",
+            "props": {
+                "model": "cron",
+                "label": "定时表达式（5 段 Cron）",
+                "hint": "默认 0 8 * * * 表示每天 08:00",
+            },
+        }
+        onlyonce = {
+            "component": "VSwitch",
+            "props": {"model": "onlyonce", "label": "保存后立即运行一次"},
+        }
         return (
             [{
                 "component": "VForm",
                 "content": [
-                    {
-                        "component": "VAlert",
-                        "props": {
-                            "type": "info",
-                            "variant": "tonal",
-                            "text": "密码只用于生成登录摘要，保存后明文立即从配置中清除。"
-                                    "登录凭据请用 MoviePilot 已配置的通知渠道接收，插件不另建推送通道。",
-                        },
-                    },
-                    {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
-                    {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "username",
-                            "label": "国网登录账号（手机号）",
-                            "hint": "与网上国网 App 登录手机号一致",
-                        },
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "password",
-                            "label": "国网登录密码",
-                            "type": "password",
-                            "hint": "仅在新填或改密时需要；保存后清空，不会再显示明文",
-                            "clearable": True,
-                        },
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "alt_account",
-                            "label": "备用登录标识（选填）",
-                            "hint": "登记在国网的邮箱；主标识被限流时自动尝试一次",
-                            "clearable": True,
-                        },
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "cons_no",
-                            "label": "只推送指定户号（选填）",
-                            "hint": "留空则推送账号下全部居民户号",
-                            "clearable": True,
-                        },
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "cron",
-                            "label": "定时表达式（5 段 Cron）",
-                            "hint": "默认 0 8 * * * 表示每天 08:00",
-                        },
-                    },
-                    {
-                        "component": "VSwitch",
-                        "props": {
-                            "model": "notify_on_error",
-                            "label": "登录或接口失败时推送错误说明",
-                        },
-                    },
-                    {
-                        "component": "VSwitch",
-                        "props": {
-                            "model": "onlyonce",
-                            "label": "保存后立即运行一次",
-                        },
-                    },
+                    self._row(self._col(notice)),
+                    self._row(self._col(enabled, md=6), self._col(notify_on_error, md=6)),
+                    self._row(self._col(username, md=6), self._col(password, md=6)),
+                    self._row(self._col(alt_account, md=6), self._col(cons_no, md=6)),
+                    self._row(self._col(cron)),
+                    self._row(self._col(onlyonce)),
                 ],
             }],
             {
@@ -270,10 +282,27 @@ class ElectricityDaily(_PluginBase):
         )
 
     def get_page(self) -> list[dict]:
+        """数据/诊断页：展示最近一次执行结果，便于不翻系统日志就能定位。"""
+        config_ready = "是" if (self._username and self._digest) else "否（缺少账号或密码摘要）"
+        enabled = "是" if self._enabled else "否"
+        digest_len = len(self._digest)
+        diag = (
+            f"插件状态：{'已启用' if self._enabled else '未启用'}\n"
+            f"登录账号：{'已填写' if self._username else '未填写'}\n"
+            f"密码摘要：{'已保存（长度 %d）' % digest_len if digest_len == 32 else '未保存（请在配置里重新输入密码并保存）'}\n"
+            f"定时任务：{'已注册' if self._cron and not self._cron_error else '未注册' + ('（' + self._cron_error + '）' if self._cron_error else '')}\n"
+            f"Cron：{self._cron}\n"
+            f"最近执行：{self._last_status}\n"
+            f"说明：若“最近执行”仍是尚未运行，请打开配置里的“保存后立即运行一次”，或等待下一个 Cron 时间点。"
+        )
         preview = self._last_report.get("text") or "暂无抓取记录"
         preview = preview[:1200]
         return [
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": self._last_status}},
+            {"component": "VAlert", "props": {
+                "type": "info", "variant": "tonal",
+                "text": f"配置检查：启用={enabled}，凭据就绪={config_ready}",
+            }},
+            {"component": "VPre", "content": diag},
             {"component": "VPre", "content": preview},
         ]
 
@@ -399,9 +428,11 @@ class ElectricityDaily(_PluginBase):
     def _handle_failure(self, error: BaseException, category: str, notify: bool | None = None) -> None:
         if isinstance(error, LoginError):
             logger.warning("电费日报：%s，原因=%s", category, error.reason)
+            detail = f"{category}（{error.reason}）"
         else:
             logger.warning("电费日报：%s：%s", category, str(error))
-        self._remember(f"{category}：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
+            detail = f"{category}（{str(error)[:120]}）"
+        self._remember(f"{detail}：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
         should_notify = self._notify_on_error if notify is None else notify
         if should_notify:
             self._send("电费日报 | 执行失败", build_error_text(self.plugin_name, error))

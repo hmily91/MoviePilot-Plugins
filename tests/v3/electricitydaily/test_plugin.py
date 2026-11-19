@@ -87,12 +87,16 @@ class PluginTest(unittest.TestCase):
 
     def test_config_form_hides_password_and_exposes_cron(self) -> None:
         form, defaults = self.make_plugin().get_form()
-        fields = {}
-        for card in form:
-            for item in card.get("content", []):
+        fields: dict[str, tuple[str, dict]] = {}
+
+        def walk(nodes: list[dict]) -> None:
+            for item in nodes:
                 props = item.get("props", {})
                 if props.get("model"):
                     fields[props["model"]] = (item.get("component"), props)
+                walk(item.get("content", []))
+
+        walk(form)
         self.assertEqual(fields["password"][0], "VTextField")
         self.assertEqual(fields["password"][1].get("type"), "password")
         self.assertEqual(defaults["cron"], "0 8 * * *")
@@ -217,6 +221,21 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(body["params"]["quInfo"]["password"], digest.upper())
         self.assertNotIn("plain-password", str(body))
         client.close()
+
+    def test_page_shows_diagnosis_when_credentials_missing(self) -> None:
+        plugin = self.make_plugin()
+        plugin.init_plugin({"enabled": True, "username": "", "password": ""})
+        page = plugin.get_page()
+        text = str(page)
+        self.assertIn("未保存", text)
+        self.assertIn("尚未运行", text)
+        self.assertIn("保存后立即运行一次", text)
+
+    def test_page_shows_login_error_category(self) -> None:
+        plugin = self.make_plugin()
+        plugin.init_plugin({"enabled": True, "username": "13800000000", "password": "pw"})
+        plugin._handle_failure(LoginError("invalid_auth"), "登录失败", notify=False)
+        self.assertIn("invalid_auth", plugin._last_status)
 
     def test_secure_roundtrip(self) -> None:
         secret = hashlib.md5(b"pw").hexdigest()

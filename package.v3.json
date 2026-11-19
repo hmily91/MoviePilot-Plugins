@@ -77,13 +77,14 @@
     "name": "电费日报",
     "description": "每日登录网上国网，推送用电量、账户余额与阶梯电量剩余。",
     "labels": "生活工具",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "Moviepilot_A.png",
     "author": "hmily",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.0.0": "首次发布：Cron 定时取数、凭据加密、推送与错误处理。"
+      "v1.0.0": "首次发布：Cron 定时取数、凭据加密、推送与错误处理。",
+      "v1.0.1": "修复配置页字段重叠（全部字段包进 VRow/VCol 栅格）；作者署名改为 hmily；诊断页展示凭据/定时/最近执行状态与错误分类，便于无需日志即可定位。"
     },
     "release": false
   }
