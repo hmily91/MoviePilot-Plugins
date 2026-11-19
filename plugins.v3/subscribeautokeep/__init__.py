@@ -95,7 +95,7 @@ class SubscribeAutoKeep(_PluginBase):
     plugin_name = "订阅自动保种助手"
     plugin_desc = "发现同季同分辨率的整季全集时，清理旧订阅及其种子/文件/记录，再下载整包以便保种与刮削"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "3.2.0"
+    plugin_version = "3.2.1"
     plugin_author = "hmily91"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "subscribeautokeep_"
@@ -257,12 +257,33 @@ class SubscribeAutoKeep(_PluginBase):
             "props": {"type": kind, "variant": "tonal", "density": "compact"},
             "text": text,
         }
-        button = lambda text, path: {  # noqa: E731
-            "component": "VBtn",
-            "props": {"color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2"},
-            "text": text,
-            "events": {"click": {"api": f"plugin/{PLUGIN_ID}/{path}", "method": "post", "params": {}}},
-        }
+        # 配置页由 FormRender.vue 渲染：它只识别 props 里以 on 开头的「字符串函数」，
+        # 不识别顶层 events（events 只被详情页 PageRender.vue 处理）。因此按钮必须
+        # 写成 props.onclick + window.MoviePilotAPI.post，与官方 V3 插件保持一致。
+        def button(text: str, path: str) -> dict[str, Any]:
+            onclick = (
+                "function(e) { "
+                f"window.MoviePilotAPI.post('plugin/{PLUGIN_ID}/{path}', {{}})"
+                ".then(function(r) { "
+                "var d = (r && r.data) ? r.data : r; "
+                "alert(d && d.message ? d.message : '操作已完成，请查看插件日志'); "
+                "})"
+                ".catch(function(err) { "
+                "console.error(err); "
+                "alert('调用失败，请查看浏览器控制台与插件日志'); "
+                "}) }"
+            )
+            return {
+                "component": "VBtn",
+                "props": {
+                    "color": "primary",
+                    "variant": "flat",
+                    "size": "small",
+                    "class": "mr-2 mb-2",
+                    "onclick": onclick,
+                },
+                "text": text,
+            }
 
         form = [
             {
@@ -342,14 +363,18 @@ class SubscribeAutoKeep(_PluginBase):
                 "endpoint": self.api_run,
                 "methods": ["POST"],
                 "summary": "立即扫描一次（仍受测试模式约束）",
-                "auth": True,
+                # V3 动态路由按字符串判断：仅 "bear" 走登录 token 校验，
+                # 其它值（含布尔 True）都会落到 apikey 校验，导致配置页按钮 401。
+                "auth": "bear",
             },
             {
                 "path": "/validate",
                 "endpoint": self.api_validate,
                 "methods": ["POST"],
                 "summary": "校验 Cron 与包含/排除规则，并回显上轮被规则筛掉的真实标题",
-                "auth": True,
+                # V3 动态路由按字符串判断：仅 "bear" 走登录 token 校验，
+                # 其它值（含布尔 True）都会落到 apikey 校验，导致配置页按钮 401。
+                "auth": "bear",
             },
         ]
 
@@ -468,13 +493,25 @@ class SubscribeAutoKeep(_PluginBase):
     def scan(self, manual: bool = False) -> dict[str, Any]:
         """Cron 主扫描：遍历原生订阅 → 站点检索 → 规则+整季全集判定 → 候选收敛 → 入队。"""
         if not self._enabled:
-            return {"ok": False, "reason": "插件未启用"}
+            # 手动按钮也会走到这里；必须留日志与可读回执，否则用户会以为按钮没反应。
+            self._log("【立即扫描】被拒绝：插件未启用。请打开「启用插件」并保存后再点按钮。")
+            return {
+                "ok": False,
+                "reason": "插件未启用",
+                "message": "插件未启用：请先打开「启用插件」并保存配置，再点「立即扫描一次」。",
+            }
         if self._config_errors:
             self._log("Cron 或包含/排除规则非法，本轮扫描已跳过")
-            return {"ok": False, "reason": "配置校验未通过", "errors": self._config_errors}
+            return {
+                "ok": False, "reason": "配置校验未通过", "errors": self._config_errors,
+                "message": "配置校验未通过：" + "；".join(self._config_errors),
+            }
         if not self._lock.acquire(blocking=False):
             self._log("上一轮扫描尚未结束，跳过本次触发")
-            return {"ok": False, "reason": "扫描正在进行中"}
+            return {
+                "ok": False, "reason": "扫描正在进行中",
+                "message": "上一轮扫描尚未结束，请稍后再试。",
+            }
 
         test_mode = bool(self._cfg.get("test_mode"))
         resolution = _text(self._cfg.get("resolution")) or "any"
@@ -660,13 +697,16 @@ class SubscribeAutoKeep(_PluginBase):
                 f"包含规则拒绝 {summary['include_rejected']} 条 / "
                 f"多候选订阅 {summary['multi_candidate']} 条"
             )
+            summary["message"] = summary["summary"] + (
+                "（测试模式：仅记录，不删除、不下载）" if test_mode else ""
+            )
             self._last_report = summary
             self._save_state()
             self._log(f"扫描完成：{summary['summary']}")
             return summary
         except Exception as error:
             logger.error(f"【{self.plugin_name}】扫描异常：{error}\n{traceback.format_exc()}")
-            return {"ok": False, "reason": str(error)}
+            return {"ok": False, "reason": str(error), "message": f"扫描异常：{error}"}
         finally:
             self._lock.release()
 
@@ -858,12 +898,19 @@ class SubscribeAutoKeep(_PluginBase):
     # API
     # ------------------------------------------------------------------
 
-    def api_run(self) -> dict[str, Any]:
-        """API：立即执行一次扫描（仍受测试模式约束）。"""
+    def api_run(self, kwargs: Any = None) -> dict[str, Any]:
+        """API：立即执行一次扫描（仍受测试模式约束）。
+
+        kwargs 是 V3 插件 API 的通用占位参数：宿主/前端可能附带，声明后可安全忽略。
+        """
+        self._log("【立即扫描一次】按钮已触发，启用=%s 测试模式=%s" % (
+            self._enabled, self._cfg.get("test_mode"),
+        ))
         return self.scan(manual=True)
 
-    def api_validate(self) -> dict[str, Any]:
+    def api_validate(self, kwargs: Any = None) -> dict[str, Any]:
         """API：校验 Cron 与规则，并回显上一轮真实标题的筛选结果。"""
+        self._log("【校验规则】按钮已触发，开始校验 Cron 与包含/排除规则")
         cron_value = _text(self._cfg.get("cron"))
         cron_ok, cron_msg = core.validate_cron(cron_value)
         include_rules, include_errors = core.parse_rules(
@@ -874,6 +921,11 @@ class SubscribeAutoKeep(_PluginBase):
         )
         errors = ([] if cron_ok else [f"Cron 表达式非法：{cron_msg}"]) \
             + include_errors + exclude_errors
+        self._log(
+            f"【校验规则】Cron={'合法' if cron_ok else '非法'} | "
+            f"包含 {len(include_rules)} 条 / 排除 {len(exclude_rules)} 条 | "
+            f"错误 {len(errors)} 项" + ("：" + "；".join(errors) if errors else "")
+        )
         report = self._last_report or {}
         return {
             "ok": not errors,

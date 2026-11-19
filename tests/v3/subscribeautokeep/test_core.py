@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -522,6 +524,66 @@ class TestBestIndex(unittest.TestCase):
 
     def test_empty_input(self):
         self.assertEqual(core.best_index([]), -1)
+
+
+class TestPluginContract(unittest.TestCase):
+    """防止配置页按钮与插件 API 鉴权被改回失效写法（v3.2.1 回归防线）。
+
+    配置页由 FormRender.vue 渲染：只认 props 里以 on 开头的字符串函数，
+    不认顶层 events；动态路由注册按 ``auth == "bear"`` 选择登录 token 校验，
+    其它值一律落到 apikey 校验。任一处写错，按钮都会被静默忽略或 401。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        plugin_dir = ROOT / "plugins.v3" / "subscribeautokeep"
+        cls.main_src = (plugin_dir / "__init__.py").read_text(encoding="utf-8")
+        cls.form = json.loads((plugin_dir / "form.json").read_text(encoding="utf-8"))
+        cls.meta = json.loads((plugin_dir / "plugin.json").read_text(encoding="utf-8"))
+        cls.index = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))
+
+    def test_api_auth_is_bearer_string(self):
+        self.assertEqual(self.main_src.count('"auth": "bear"'), 2)
+        self.assertNotIn('"auth": True', self.main_src)
+        self.assertNotIn('"auth": "apikey"', self.main_src)
+
+    def test_config_buttons_use_onclick(self):
+        self.assertIn('"onclick": onclick', self.main_src)
+        self.assertIn("window.MoviePilotAPI.post('plugin/", self.main_src)
+        self.assertNotIn('"events": {"click"', self.main_src)
+
+    def test_form_snapshot_buttons(self):
+        buttons = []
+
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("component") == "VBtn":
+                    buttons.append(node)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(self.form["form"])
+        self.assertEqual(len(buttons), 2)
+        for btn in buttons:
+            self.assertNotIn("events", btn)
+            onclick = btn["props"].get("onclick", "")
+            self.assertIn("window.MoviePilotAPI.post", onclick)
+            self.assertIn(".catch", onclick)
+        self.assertIn("plugin/SubscribeAutoKeep/run", buttons[0]["props"]["onclick"])
+        self.assertIn("plugin/SubscribeAutoKeep/validate", buttons[1]["props"]["onclick"])
+
+    def test_button_endpoints_have_logs_and_message(self):
+        for marker in ("【立即扫描一次】", "【校验规则】", '"message"'):
+            self.assertIn(marker, self.main_src)
+
+    def test_versions_consistent(self):
+        version = re.search(r'plugin_version = "([^"]+)"', self.main_src).group(1)
+        self.assertEqual(version, "3.2.1")
+        self.assertEqual(self.meta["version"], version)
+        self.assertEqual(self.index["SubscribeAutoKeep"]["version"], version)
 
 
 if __name__ == "__main__":

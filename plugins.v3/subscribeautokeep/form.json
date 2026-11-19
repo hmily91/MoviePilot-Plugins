@@ -1,7 +1,7 @@
 {
   "plugin_id": "SubscribeAutoKeep",
   "render_mode": "vuetify",
-  "description": "配置页 Vuetify JSON 快照。运行时由 __init__.py 的 get_form() 生成同一份结构，并把 sites 的 items 动态替换为 SiteOper.list_active() 的站点列表；本文件供审阅与二次开发使用。",
+  "description": "配置页 Vuetify JSON 快照。运行时由 __init__.py 的 get_form() 生成同一份结构，并把 sites 的 items 动态替换为 SiteOper.list_active() 的站点列表；本文件供审阅与二次开发使用。注意：配置页由 FormRender.vue 渲染，按钮必须用 props.onclick 字符串函数 + window.MoviePilotAPI.post；顶层 events 仅详情页 PageRender.vue 支持，写在配置页会被静默忽略。对应 API 的 auth 必须是字符串 bear。",
   "rule_hint": "每行一条，新增=加一行，删除=删掉该行；# 开头为注释。普通文字按关键字匹配，也支持正则（忽略大小写）。匹配范围：标题 + 副标题 + 站点标签。",
   "form": [
     {
@@ -149,8 +149,8 @@
               "component": "VCol",
               "props": { "cols": 12 },
               "content": [
-                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "立即扫描一次", "events": { "click": { "api": "plugin/SubscribeAutoKeep/run", "method": "post", "params": {} } } },
-                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2" }, "text": "校验规则", "events": { "click": { "api": "plugin/SubscribeAutoKeep/validate", "method": "post", "params": {} } } }
+                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2", "onclick": "function(e) { window.MoviePilotAPI.post('plugin/SubscribeAutoKeep/run', {}).then(function(r) { var d = (r && r.data) ? r.data : r; alert(d && d.message ? d.message : '操作已完成，请查看插件日志'); }).catch(function(err) { console.error(err); alert('调用失败，请查看浏览器控制台与插件日志'); }) }" }, "text": "立即扫描一次" },
+                { "component": "VBtn", "props": { "color": "primary", "variant": "flat", "size": "small", "class": "mr-2 mb-2", "onclick": "function(e) { window.MoviePilotAPI.post('plugin/SubscribeAutoKeep/validate', {}).then(function(r) { var d = (r && r.data) ? r.data : r; alert(d && d.message ? d.message : '操作已完成，请查看插件日志'); }).catch(function(err) { console.error(err); alert('调用失败，请查看浏览器控制台与插件日志'); }) }" }, "text": "校验规则" }
               ]
             }
           ]
