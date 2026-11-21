@@ -77,7 +77,7 @@
     "name": "电费日报",
     "description": "每日登录网上国网，推送用电量、账户余额与阶梯电量剩余。",
     "labels": "生活工具",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "icon": "Moviepilot_A.png",
     "author": "hmily",
     "level": 1,
@@ -87,7 +87,8 @@
       "v1.0.1": "修复配置页字段重叠（全部字段包进 VRow/VCol 栅格）；作者署名改为 hmily；诊断页展示凭据/定时/最近执行状态与错误分类，便于无需日志即可定位。",
       "v1.0.2": "修复“户号列表缺失”误报：业务接口先校验 code，限流/验证码等错误直接给出真实原因而非含糊的数据缺失；户号列表兼容多种回包层级；解析失败时附带脱敏回包结构（仅字段名/类型，无隐私值）便于定位。",
       "v1.0.3": "修复户号接口只回 srvrt 无 bizrt 的根因：请求补传 quInfo.userId（对齐开源实现），日用电接口同样补传；户号列表增加从登录 userInfo 兜底取数；同时校验 data.srvrt.resultCode（顶层成功但服务层失败也能识别）；诊断字段保留明文错误码、户号/手机号打码。",
-      "v1.0.4": "用真实账号会话实测并对齐国网真实回包：余额接口补 funcCode/proCode、阶梯接口补 consType/proCode/queryDate 并在当月未出账时自动回退上月；阶梯解析支持真实字段 oneLevelPq/firstBalPq/totalYearPq/levelFlag 并推算三档剩余；余额解析兼容 data.list。实测余额、本月电费与三档阶梯剩余均可正常推送。"
+      "v1.0.4": "用真实账号会话实测并对齐国网真实回包：余额接口补 funcCode/proCode、阶梯接口补 consType/proCode/queryDate 并在当月未出账时自动回退上月；阶梯解析支持真实字段 oneLevelPq/firstBalPq/totalYearPq/levelFlag 并推算三档剩余；余额解析兼容 data.list。实测余额、本月电费与三档阶梯剩余均可正常推送。",
+      "v1.0.5": "修复日用电量取不到的根因：c24/f01 请求字段对齐服务端实测值——consType 固定为 01（原误写 constType 且带入门号电型），业务码用 funcCode=WEBALIPAY_01（原误写 busiTypeCode），补 srvCode/userName 并改用 loginAccount；解析层已支持 sevenEleList 的日用电日历数据。"
     },
     "release": false
   }

@@ -342,6 +342,32 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(captured["payload"]["params1"]["quInfo"], {"userId": "uid-456"})
         client.close()
 
+    def test_daily_payload_uses_server_field_names(self) -> None:
+        """日用电 must use consType=01 + funcCode=WEBALIPAY_01, not constType/busiTypeCode."""
+        client = self._make_client()
+        client.user_info = {"userId": "uid-456", "loginAccount": "acct"}
+        captured: dict[str, Any] = {}
+
+        def fake_call(api: str, payload: dict[str, Any]) -> dict[str, Any]:
+            captured["payload"] = payload
+            return {}
+
+        client.call = fake_call  # type: ignore[method-assign]
+        # 故意给门号塞 elecTypeCode=03，服务端固定要 01，不能被门号值带偏
+        client.fetch_daily(
+            {"consNo_dst": "4206668917676", "elecTypeCode": "03"},
+            "20261101", "20261119", 2026,
+        )
+        data = captured["payload"]["params3"]["data"]
+        self.assertEqual(data.get("consType"), "01")
+        self.assertNotIn("constType", data)
+        self.assertEqual(data.get("funcCode"), "WEBALIPAY_01")
+        self.assertNotIn("busiTypeCode", data)
+        self.assertEqual(data.get("startTime"), "20261101")
+        self.assertEqual(data.get("endTime"), "20261119")
+        self.assertEqual(data.get("queryYear"), 2026)
+        client.close()
+
     def test_parse_real_ladder_fields(self) -> None:
         """湖北 c04/f03 真实字段：oneLevelPq/firstBalPq/totalYearPq/levelFlag。"""
         plain = {"code": "1", "data": {"list": [{"electricParticulars": {

@@ -777,33 +777,42 @@ class StateGridClient:
         return plain
 
     def fetch_daily(self, door: dict[str, Any], start: str, end: str, year: int) -> dict[str, Any]:
-        """start/end 形如 20261001；页面版回包的 day 也可能是 2026-10-01。"""
+        """start/end 形如 20261001；页面版回包的 day 也可能是 2026-10-01。
+
+        字段名以 bilezhou/state_grid 实测过的 getday 请求为准，两个坑踩过：
+          * 是 consType（不是 constType），且服务端只认固定值 "01"——用门号的
+            elecTypeCode 填会拿到空 sevenEleList，和阶梯接口不是同一套取值；
+          * 业务码字段是 funcCode（不是 busiTypeCode），值 WEBALIPAY_01。
+        """
         ident = self._door_identity(door)
+        user_id = str(self.user_info.get("userId") or "")
+        user_name = str(self.user_info.get("loginAccount")
+                        or self.user_info.get("userName") or "")
         payload = {
             "params1": {
                 "serviceCode": "BCP_000026",
                 "source": MEMBER,
                 "target": "32101",
-                "quInfo": {"userId": str(self.user_info.get("userId") or "")},
+                "quInfo": {"userId": user_id},
                 "uscInfo": self._usc_info(),
                 "token": self.token,
             },
             "params3": {
                 "data": {
-                    "acctId": str(self.user_info.get("userId") or ""),
+                    "acctId": user_id,
                     "consNo": ident["consNo"],
-                    "constType": ident["consType"],
+                    "consType": "01",
                     "endTime": end,
                     "orgNo": ident["orgNo"],
                     "queryYear": year,
-                    "proNo": ident["proNo"],
                     "proCode": ident["proNo"],
                     "promotCode": "1",
                     "promotType": "1",
                     "serialNo": "",
+                    "srvCode": "",
                     "startTime": start,
-                    "userName": str(self.user_info.get("userName") or ""),
-                    "busiTypeCode": "WEBALIPAY_01",
+                    "userName": user_name,
+                    "funcCode": "WEBALIPAY_01",
                     "channelCode": MEMBER,
                     "clearCache": "11",
                     "serviceCode": "BCP_000026",
