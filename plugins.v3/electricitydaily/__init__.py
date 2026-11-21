@@ -45,10 +45,21 @@ try:
 except Exception:
     CronTrigger = None  # type: ignore[assignment]
 
+def _resolve_message_type(message_type_cls: Any) -> Any:
+    """优先选"其它"类型，便于在 MP 里把该类通知限定为仅管理员。
+
+    v3.2.9+ 枚举为 MessageType.Other = "其它"；个别版本若没有该成员，
+    回退到 Plugin，保证消息仍能发出。
+    """
+    if message_type_cls is None:
+        return None
+    return getattr(message_type_cls, "Other", None) or getattr(message_type_cls, "Plugin", None)
+
+
 try:
     from app.schemas.types import MessageType
 
-    _PLUGIN_MTYPE = getattr(MessageType, "Plugin", None)
+    _PLUGIN_MTYPE = _resolve_message_type(MessageType)
 except Exception:
     _PLUGIN_MTYPE = None
 
@@ -74,7 +85,7 @@ class ElectricityDaily(_PluginBase):
     plugin_name = "电费日报"
     plugin_desc = "每日自动登录网上国网，推送用电量、账户余额与阶梯电量剩余。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_author = "hmily"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "electricitydaily_"

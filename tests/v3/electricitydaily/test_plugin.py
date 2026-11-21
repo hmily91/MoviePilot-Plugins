@@ -75,6 +75,22 @@ class PluginTest(unittest.TestCase):
         plugin.post_message = lambda **kwargs: self.messages.append(kwargs)  # type: ignore[method-assign]
         return plugin
 
+    def test_message_type_prefers_other_for_admin_only(self) -> None:
+        """通知类型应为"其它"(MessageType.Other)，便于 MP 里限定仅管理员可见。"""
+        from enum import Enum
+
+        class FullTypes(Enum):
+            Plugin = "插件"
+            Other = "其它"
+
+        class LegacyTypes(Enum):
+            Plugin = "插件"
+
+        self.assertIs(electricitydaily._resolve_message_type(FullTypes), FullTypes.Other)
+        # 老版本没有 Other 时回退 Plugin，保证消息仍可发出
+        self.assertIs(electricitydaily._resolve_message_type(LegacyTypes), LegacyTypes.Plugin)
+        self.assertIsNone(electricitydaily._resolve_message_type(None))
+
     def test_password_is_never_stored_in_plaintext(self) -> None:
         plugin = self.make_plugin()
         plugin.init_plugin({"enabled": True, "username": "13800000000",

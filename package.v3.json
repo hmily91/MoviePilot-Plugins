@@ -77,8 +77,8 @@
     "name": "电费日报",
     "description": "每日登录网上国网，推送用电量、账户余额与阶梯电量剩余。",
     "labels": "生活工具",
-    "version": "1.0.7",
-    "icon": "https://raw.githubusercontent.com/hmily91/MoviePilot-Plugins/main/icons/electricitydaily.png",
+    "version": "1.0.8",
+    "icon": "Moviepilot_A.png",
     "author": "hmily",
     "level": 1,
     "system_version": ">=3.0.0",
@@ -90,7 +90,8 @@
       "v1.0.4": "用真实账号会话实测并对齐国网真实回包：余额接口补 funcCode/proCode、阶梯接口补 consType/proCode/queryDate 并在当月未出账时自动回退上月；阶梯解析支持真实字段 oneLevelPq/firstBalPq/totalYearPq/levelFlag 并推算三档剩余；余额解析兼容 data.list。实测余额、本月电费与三档阶梯剩余均可正常推送。",
       "v1.0.5": "修复日用电量取不到的根因：c24/f01 请求字段对齐服务端实测值——consType 固定为 01（原误写 constType 且带入门号电型），业务码用 funcCode=WEBALIPAY_01（原误写 busiTypeCode），补 srvCode/userName 并改用 loginAccount；解析层已支持 sevenEleList 的日用电日历数据。",
       "v1.0.6": "修复日用电量仍为空的真正根因：c24/f01 的 startTime/endTime 必须传带横杠的 ISO 日期（2026-11-01），此前传纯数字 20261101 时服务端仍回 code=1 成功但 data 为空；fetch_daily 内部统一做日期正规化。已用真实账号会话实测：40 行 sevenEleList，日用电、余额、三档阶梯均正常解析。",
-      "v1.0.7": "修复日报仍显示日用电量'暂无数据'的最后一处根因：查询截止到今天时，服务端会多返回一条当天未出账、dayElePq 为空的记录，解析取最新日期正好命中该空行。现入口查询截止改为昨天，且 parse_daily 跳过无用电量的空行（真实 0 用电不受影响）。已用真实会话复现并验证两户号均回落到 2026-11-20 的 3.5/5.27 kWh，与 APP 一致。"
+      "v1.0.7": "修复日报仍显示日用电量'暂无数据'的最后一处根因：查询截止到今天时，服务端会多返回一条当天未出账、dayElePq 为空的记录，解析取最新日期正好命中该空行。现入口查询截止改为昨天，且 parse_daily 跳过无用电量的空行（真实 0 用电不受影响）。已用真实会话复现并验证两户号均回落到 2026-11-20 的 3.5/5.27 kWh，与 APP 一致。",
+      "v1.0.8": "通知类型由「插件」(MessageType.Plugin)改为「其它」(MessageType.Other)，便于在 MP 通知设置里把「其它」范围的发送对象单独限定为仅管理员，使电费日报只推送给管理员；老版本枚举无 Other 时自动回退 Plugin。新增测试锁定该取值逻辑。"
     },
     "release": false
   }
