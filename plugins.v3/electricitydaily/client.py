@@ -776,14 +776,29 @@ class StateGridClient:
                 return plain
         return plain
 
-    def fetch_daily(self, door: dict[str, Any], start: str, end: str, year: int) -> dict[str, Any]:
-        """start/end 形如 20261001；页面版回包的 day 也可能是 2026-10-01。
+    @staticmethod
+    def _dash_date(value: str) -> str:
+        """把 20261101 / 2026-11-01 统一成服务端要的 2026-11-01。
 
-        字段名以 bilezhou/state_grid 实测过的 getday 请求为准，两个坑踩过：
+        实测：c24/f01 只认带横杠的 ISO 日期；传纯数字 20261101 时服务端
+        仍回 code=1 成功，但 data 是空的，日用电列表一行都没有——最隐蔽的坑。
+        """
+        digits = str(value or "").strip().replace("-", "").replace("/", "")
+        if len(digits) == 8 and digits.isdigit():
+            return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
+        return str(value or "")
+
+    def fetch_daily(self, door: dict[str, Any], start: str, end: str, year: int) -> dict[str, Any]:
+        """start/end 接受 20261001 或 2026-10-01，内部统一成带横杠的 ISO 日期。
+
+        字段名与格式以真实账号实测通过的 getday 请求为准，三个坑：
+          * startTime/endTime 必须是 2026-11-01 这种带横杠格式，纯数字回空 data；
           * 是 consType（不是 constType），且服务端只认固定值 "01"——用门号的
-            elecTypeCode 填会拿到空 sevenEleList，和阶梯接口不是同一套取值；
+            constType=03 填会拿到空 sevenEleList；
           * 业务码字段是 funcCode（不是 busiTypeCode），值 WEBALIPAY_01。
         """
+        start = self._dash_date(start)
+        end = self._dash_date(end)
         ident = self._door_identity(door)
         user_id = str(self.user_info.get("userId") or "")
         user_name = str(self.user_info.get("loginAccount")

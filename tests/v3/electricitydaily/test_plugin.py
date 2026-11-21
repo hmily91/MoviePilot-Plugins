@@ -363,9 +363,27 @@ class PluginTest(unittest.TestCase):
         self.assertNotIn("constType", data)
         self.assertEqual(data.get("funcCode"), "WEBALIPAY_01")
         self.assertNotIn("busiTypeCode", data)
-        self.assertEqual(data.get("startTime"), "20261101")
-        self.assertEqual(data.get("endTime"), "20261119")
+        # 实测：服务端只认带横杠的 ISO 日期，纯数字格式回空 data
+        self.assertEqual(data.get("startTime"), "2026-11-01")
+        self.assertEqual(data.get("endTime"), "2026-11-19")
         self.assertEqual(data.get("queryYear"), 2026)
+        client.close()
+
+    def test_daily_payload_accepts_dashed_dates(self) -> None:
+        """调用方直接传带横杠日期时不应被二次加工。"""
+        client = self._make_client()
+        client.user_info = {"userId": "uid-456"}
+        captured: dict[str, Any] = {}
+        def fake_call(api: str, payload: dict[str, Any]) -> dict[str, Any]:
+            captured["payload"] = payload
+            return {}
+        client.call = fake_call  # type: ignore[method-assign]
+        client.fetch_daily(
+            {"consNo_dst": "4206668917676"}, "2026-10-12", "2026-11-20", 2026,
+        )
+        data = captured["payload"]["params3"]["data"]
+        self.assertEqual(data.get("startTime"), "2026-10-12")
+        self.assertEqual(data.get("endTime"), "2026-11-20")
         client.close()
 
     def test_parse_real_ladder_fields(self) -> None:
