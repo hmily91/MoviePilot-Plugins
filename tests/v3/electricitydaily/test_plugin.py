@@ -342,6 +342,52 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(captured["payload"]["params1"]["quInfo"], {"userId": "uid-456"})
         client.close()
 
+    def test_parse_real_ladder_fields(self) -> None:
+        """湖北 c04/f03 真实字段：oneLevelPq/firstBalPq/totalYearPq/levelFlag。"""
+        plain = {"code": "1", "data": {"list": [{"electricParticulars": {
+            "oneLevelPq": "2160", "twoLevelPq": "2640",
+            "firstBalPq": "212", "secondBalPq": "2640",
+            "totalYearPq": "1948", "levelFlag": "2",
+        }}]}}
+        tiers, stage = models.parse_ladder(plain)
+        self.assertEqual(stage, 2)
+        self.assertEqual(len(tiers), 3)
+        self.assertEqual(tiers[0].quota, 2160.0)
+        self.assertEqual(tiers[0].remaining, 212.0)
+        self.assertEqual(tiers[1].quota, 2640.0)
+        self.assertEqual(tiers[1].remaining, 2640.0)
+
+    def test_parse_balance_from_data_list(self) -> None:
+        """真实余额回包在 data.list[0]，不是 data.bizrt。"""
+        plain = {"code": "1", "data": {"rtnCode": "0", "list": [{
+            "sumMoney": "162.91", "prepayBal": "215.36",
+            "estiAmt": "52.45", "historyOwe": "0", "totalPq": "154",
+        }]}}
+        result = models.parse_balance(plain)
+        self.assertEqual(result["balance"], 162.91)
+        self.assertEqual(result["month_fee"], 52.45)
+        self.assertEqual(result["history_owe"], 0.0)
+
+    def test_balance_payload_uses_func_code_and_pro_code(self) -> None:
+        """余额 payload 必须用 funcCode 与 list 项 proCode，否则服务端返回空。"""
+        client = self._make_client()
+        client.user_info = {"userId": "uid-1", "loginAccount": "acct"}
+        captured: dict[str, Any] = {}
+
+        def fake_call(api: str, payload: dict[str, Any]) -> dict[str, Any]:
+            captured["payload"] = payload
+            return {}
+
+        client.call = fake_call  # type: ignore[method-assign]
+        client.fetch_balance({"consNo_dst": "4206668917676", "proNo": "42102",
+                              "orgNo": "424050208", "consSortCode": "01"})
+        data = captured["payload"]["data"]
+        self.assertIn("funcCode", data)
+        self.assertNotIn("busiTypeCode", data)
+        self.assertIn("proCode", data["list"][0])
+        self.assertNotIn("proNo", data["list"][0])
+        client.close()
+
     def test_secure_roundtrip(self) -> None:
         secret = hashlib.md5(b"pw").hexdigest()
         sealed = secure.seal(secret)

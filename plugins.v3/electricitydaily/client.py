@@ -685,20 +685,24 @@ class StateGridClient:
     def fetch_balance(self, door: dict[str, Any]) -> dict[str, Any]:
         ident = self._door_identity(door)
         user_id = str(self.user_info.get("userId") or "")
+        # 字段以真实回包验证为准：funcCode（非 busiTypeCode）；list 项里必须是
+        # proCode（非 proNo）且场景用 consSortCode；consNo 用解密后的明文户号。
         payload = {
             "data": {
                 "srvCode": "",
                 "serialNo": "",
                 "channelCode": MEMBER,
-                "busiTypeCode": "WEBA1007200",
+                "funcCode": "WEBA1007200",
                 "acctId": user_id,
-                "userName": str(self.user_info.get("userName") or self.user_info.get("nickname") or ""),
+                "userName": str(self.user_info.get("loginAccount")
+                                or self.user_info.get("userName")
+                                or self.user_info.get("nickname") or ""),
                 "promotType": "1",
                 "promotCode": "1",
                 "userAccountId": user_id,
                 "list": [{
                     "consNoSrc": ident["consNo"],
-                    "proNo": ident["proNo"],
+                    "proCode": ident["proNo"],
                     "sceneType": ident["sceneType"],
                     "consNo": ident["consNo"],
                     "orgNo": ident["orgNo"],
@@ -711,30 +715,66 @@ class StateGridClient:
         return self.call(API_BALANCE, payload)
 
     def fetch_ladder(self, door: dict[str, Any], year_month: str) -> dict[str, Any]:
-        """year_month 形如 2026-11，按当前阶梯年度查询。"""
+        """year_month 形如 2026-11，按当前阶梯年度查询。
+
+        字段以真实回包验证为准：服务端要 consType（不是 constType）、proCode、
+        funcCode、queryDate(YYYY-MM)；consNo 用解密后的明文户号。
+        当月账单尚未出数时（code=0/账单基础信息空），自动回退到上一个自然月。
+        """
         ident = self._door_identity(door)
-        payload = {
-            "data": {
-                "channelCode": MEMBER,
-                "busiTypeCode": "WEBALIPAY_01",
-                "promotType": "1",
-                "clearCache": "09",
-                "consNo": ident["consNo"],
-                "proNo": ident["proNo"],
-                "orgNo": ident["orgNo"],
-                "queryDate": year_month,
-                "provinceCode": ident["proNo"],
-                "constType": ident["consType"],
-                "userAccountId": str(self.user_info.get("userId") or ""),
-                "serialNo": "",
-                "userName": str(self.user_info.get("userName") or ""),
-                "acctId": str(self.user_info.get("userId") or ""),
-            },
-            "serviceCode": "BCP_000026",
-            "source": "app",
-            "target": ident["proNo"],
-        }
-        return self.call(API_LADDER, payload)
+        user_id = str(self.user_info.get("userId") or "")
+
+        def request(month: str) -> dict[str, Any]:
+            payload = {
+                "data": {
+                    "acctId": user_id,
+                    "channelCode": MEMBER,
+                    "clearCache": "11",
+                    "consType": ident["consType"],
+                    "funcCode": "ALIPAY_01",
+                    "orgNo": ident["orgNo"],
+                    "proCode": ident["proNo"],
+                    "promotCode": "1",
+                    "promotType": "1",
+                    "serialNo": "",
+                    "srvCode": "",
+                    "userName": "",
+                    "provinceCode": ident["proNo"],
+                    "userAccountId": user_id,
+                    "consNo": ident["consNo"],
+                    "queryDate": month,
+                },
+                "serviceCode": "BCP_000026",
+                "source": "app",
+                "target": ident["proNo"],
+            }
+            return self.call(API_LADDER, payload)
+
+        def no_data(p: dict[str, Any]) -> bool:
+            srv = _srvrt(p)
+            msg = str(srv.get("resultMessage") or p.get("message") or "")
+            return not bool((p.get("data") or {}).get("list")) and (
+                "账单基础信息空" in msg or str(p.get("code") or "") not in OK_CODES
+            )
+
+        try:
+            plain = request(year_month)
+        except ApiError:
+            # 当月账单未出时 call() 会抛 ApiError，这里转成"无数据"进入回退
+            plain = {"code": "0", "message": "账单基础信息空"}
+        if no_data(plain):
+            # 当月未出账，回退上月再试一次
+            try:
+                y, m = (int(x) for x in year_month.split("-")[:2])
+                prev = f"{y - 1}-12" if m == 1 else f"{y}-{m - 1:02d}"
+            except (ValueError, IndexError):
+                return plain
+            self.log.info("电费日报：%s 阶梯账单未出，回退到 %s", year_month, prev)
+            try:
+                plain = request(prev)
+            except ApiError:
+                return plain
+        return plain
 
     def fetch_daily(self, door: dict[str, Any], start: str, end: str, year: int) -> dict[str, Any]:
         """start/end 形如 20261001；页面版回包的 day 也可能是 2026-10-01。"""

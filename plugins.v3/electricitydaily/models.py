@@ -209,7 +209,13 @@ for _idx in (1, 2, 3, 4, 5):
         f"levlThrePqSum" if _idx == 3 else f"",
     })
 _TIER_KEYS.discard("")
-_TIER_KEYS.update({"levelStdCode", "stepStage", "acuPq", "levlBgnYm", "levlEndYm"})
+_TIER_KEYS.update({
+    "levelStdCode", "stepStage", "acuPq", "levlBgnYm", "levlEndYm",
+    # 湖北等省 c04/f03 的真实字段（实测 electricParticulars 节点）
+    "oneLevelPq", "twoLevelPq", "threeLevelPq",
+    "firstBalPq", "secondBalPq", "thirdBalPq",
+    "levelFlag", "totalYearPq", "totalPq",
+})
 
 
 def _first_float(node: dict[str, Any], names: Iterable[str]) -> float | None:
@@ -230,19 +236,19 @@ def parse_ladder(plain: dict[str, Any]) -> tuple[list[Tier], int | None]:
     tiers: list[Tier] = []
     alias = {
         1: (
-            ("levlOnePq", "levelOnePq", "firstRefPq", "levl1Pq", "tier1Quota", "step1Quota"),
+            ("levlOnePq", "levelOnePq", "firstRefPq", "levl1Pq", "tier1Quota", "step1Quota", "oneLevelPq"),
             ("levlOnePqSum", "levl1PqSum", "step1Used", "tier1Used", "firstUsedPq"),
-            ("levlOnePqRemain", "levlOnePqRemainPq", "levl1PqRemain", "step1Remain", "tier1Remain", "firstRemainPq"),
+            ("levlOnePqRemain", "levlOnePqRemainPq", "levl1PqRemain", "step1Remain", "tier1Remain", "firstRemainPq", "firstBalPq"),
         ),
         2: (
-            ("levlTwoPq", "levelTwoPq", "secondRefPq", "levl2Pq", "tier2Quota", "step2Quota"),
+            ("levlTwoPq", "levelTwoPq", "secondRefPq", "levl2Pq", "tier2Quota", "step2Quota", "twoLevelPq"),
             ("levlTwoPqSum", "levl2PqSum", "step2Used", "tier2Used", "secondUsedPq"),
-            ("levlTwoPqRemain", "levlTwoPqRemainPq", "levl2PqRemain", "step2Remain", "tier2Remain", "secondRemainPq"),
+            ("levlTwoPqRemain", "levlTwoPqRemainPq", "levl2PqRemain", "step2Remain", "tier2Remain", "secondRemainPq", "secondBalPq"),
         ),
         3: (
-            ("levlThrePq", "levelThreePq", "thirdRefPq", "levl3Pq", "tier3Quota", "step3Quota"),
+            ("levlThrePq", "levelThreePq", "thirdRefPq", "levl3Pq", "tier3Quota", "step3Quota", "threeLevelPq"),
             ("levlThrePqSum", "levl3PqSum", "step3Used", "tier3Used", "thirdUsedPq"),
-            ("levlThrePqRemain", "levlThrePqRemainPq", "levl3PqRemain", "step3Remain", "tier3Remain", "thirdRemainPq"),
+            ("levlThrePqRemain", "levlThrePqRemainPq", "levl3PqRemain", "step3Remain", "tier3Remain", "thirdRemainPq", "thirdBalPq"),
         ),
     }
     for idx in (1, 2, 3):
@@ -254,7 +260,30 @@ def parse_ladder(plain: dict[str, Any]) -> tuple[list[Tier], int | None]:
             continue
         tiers.append(Tier(idx, quota, used, remain).normalized())
 
-    stage = to_float(find_value(node, ("levelStdCode", "stepStage", "currentLevel")))
+    # 真实回包里额度是"各档区间电量"(oneLevelPq/twoLevelPq)、剩余是 firstBalPq/
+    # secondBalPq，年度累计已用 totalYearPq。据此补全各档 used 与第三档余量。
+    year_used = _first_float(node, ("totalYearPq", "acuPq"))
+    if year_used is not None:
+        cum = 0.0
+        for tier in tiers:
+            prev = cum
+            if tier.quota is not None:
+                cum += tier.quota
+            tier.used = round(max(0.0, min(year_used, cum) - prev), 2) if tier.quota is not None else tier.used
+            if tier.remaining is None and tier.quota is not None:
+                tier.remaining = round(max(0.0, cum - year_used) if tier.index == len(tiers) else max(0.0, cum - year_used), 2)
+        # 第三档（超额）额度/剩余：用年度累计与前两档额度推算
+        if len(tiers) >= 2 and tiers[0].quota is not None and tiers[1].quota is not None:
+            first_two = tiers[0].quota + tiers[1].quota
+            third_remaining = round(max(0.0, first_two - year_used), 2)
+            if len(tiers) == 2:
+                tiers.append(Tier(3, None, round(max(0.0, year_used - first_two), 2), third_remaining))
+            elif tiers[2].quota is None:
+                tiers[2].quota = None
+                tiers[2].used = round(max(0.0, year_used - first_two), 2)
+                tiers[2].remaining = third_remaining
+
+    stage = to_float(find_value(node, ("levelStdCode", "stepStage", "currentLevel", "levelFlag")))
     stage_int = int(stage) if stage is not None else None
     if stage_int is None and tiers:
         # 服务端没给档位码时按额度推算：已用超过前档额度就进入下一档
