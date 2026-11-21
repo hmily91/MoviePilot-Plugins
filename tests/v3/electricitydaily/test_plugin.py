@@ -237,6 +237,27 @@ class PluginTest(unittest.TestCase):
         plugin._handle_failure(LoginError("invalid_auth"), "登录失败", notify=False)
         self.assertIn("invalid_auth", plugin._last_status)
 
+    def test_business_error_code_rejected_before_parsing(self) -> None:
+        from electricitydaily.client import ApiError, business_error
+
+        limited = {"code": "11401", "message": "操作频繁请稍后再试"}
+        self.assertIn("rate_limited", business_error(limited))
+        self.assertEqual(business_error({"code": "1", "data": {}}), "")
+        self.assertEqual(business_error({"code": "0000"}), "")
+
+    def test_shape_masks_all_values(self) -> None:
+        from electricitydaily.client import shape
+
+        secret = "4206668917676"  # 户号，绝不能出现在结构描述里
+        plain = {"code": "1", "data": {"bizrt": {"powerUserList": [
+            {"consNo": secret, "userName": "张三"}
+        ]}}}
+        text = shape(plain)
+        self.assertNotIn(secret, text)
+        self.assertNotIn("张三", text)
+        self.assertIn("powerUserList", text)
+        self.assertIn("consNo", text)
+
     def test_secure_roundtrip(self) -> None:
         secret = hashlib.md5(b"pw").hexdigest()
         sealed = secure.seal(secret)

@@ -100,6 +100,53 @@ def _payload(plain: Any) -> dict[str, Any]:
     return plain
 
 
+def shape(plain: Any, max_depth: int = 6) -> str:
+    """回包的脱敏结构：只保留字段名/类型/数组长度，绝不输出任何业务值。
+
+    用于在解析失败时定位真实回包形态，同时避免把户号、姓名、地址等隐私
+    写进日志和通知。
+    """
+    def walk(node: Any, depth: int) -> str:
+        if depth > max_depth:
+            return "..."
+        if isinstance(node, dict):
+            parts = []
+            for key in list(node.keys())[:24]:
+                parts.append(f"{key}:{walk(node[key], depth + 1)}")
+            return "{" + ", ".join(parts) + "}"
+        if isinstance(node, list):
+            inner = walk(node[0], depth + 1) if node else ""
+            return f"list[{len(node)}]{'<' + inner + '>' if inner else ''}"
+        if isinstance(node, str):
+            return f"str[{len(node)}]"
+        if isinstance(node, bool):
+            return "bool"
+        if isinstance(node, (int, float)):
+            return type(node).__name__
+        return "null"
+    return walk(plain, 0)
+
+
+def business_error(plain: dict[str, Any]) -> str:
+    """若回包业务码非成功，返回包含分类与服务端可读消息的简短说明；否则空串。"""
+    if not isinstance(plain, dict):
+        return ""
+    code = str(plain.get("code") or "")
+    if code in OK_CODES or not code:
+        return ""
+    srv = _srvrt(plain)
+    text = str(srv.get("resultMessage") or plain.get("message") or "")
+    result_code = str(srv.get("resultCode") or "")
+    reason = classify_error(code, plain)
+    bits = [f"code={code}", f"分类={reason}"]
+    if result_code:
+        bits.append(f"resultCode={result_code}")
+    # 服务端消息可能含账号/姓名，这里只截取并按长度限制，避免隐私与超长
+    if text:
+        bits.append("message=" + text[:40])
+    return "，".join(bits)
+
+
 def _srvrt(plain: Any) -> dict[str, Any]:
     data = plain.get("data") if isinstance(plain, dict) else None
     srv = data.get("srvrt") if isinstance(data, dict) else None
@@ -506,6 +553,7 @@ class StateGridClient:
             if not self._ensure_bearer():
                 self._lock()
                 raise ApiError("无法获取访问令牌")
+        api_name = api.rsplit("/", 2)[-1]
         plain = self._post(api, payload)
         if self._session_dead(plain):
             try:
@@ -520,7 +568,17 @@ class StateGridClient:
         if not plain:
             self.last_error = classify_error("", {})
             self._lock()
-            raise ApiError(f"接口 {api.rsplit('/', 2)[-1]} 无有效回包")
+            raise ApiError(f"接口 {api_name} 无有效回包")
+        # 关键：先校验业务码，避免把限流/验证码等错误回包送进解析层，
+        # 造成"户号列表缺失"这类含糊报错。
+        biz_err = business_error(plain)
+        if biz_err:
+            self.last_error = classify_error(str(plain.get("code") or ""), plain)
+            self.log.warning("国网接口 %s 返回业务错误：%s", api_name, biz_err)
+            if self.last_error == "rate_limited":
+                self.cooldown_until = _end_of_day_ts()
+                self._save_session()
+            raise ApiError(f"接口 {api_name} 业务错误：{biz_err}")
         self.fail_streak = 0
         return plain
 
@@ -555,11 +613,21 @@ class StateGridClient:
         }
         plain = self.call(API_DOOR_LIST, payload)
         biz = _payload(plain)
-        doors = (biz.get("bizrt") or {}).get("powerUserList")
+        # 兼容不同省份/客户端版本：data.bizrt.powerUserList / bizrt.powerUserList /
+        # 顶层 powerUserList，以及 decryption 后直接就是列表的情况。
+        doors: Any = None
+        for node in (plain, plain.get("data"), biz, (biz.get("bizrt") if isinstance(biz, dict) else None)):
+            if not isinstance(node, dict):
+                continue
+            candidate = node.get("powerUserList")
+            if isinstance(candidate, list):
+                doors = candidate
+                break
+        if doors is None and isinstance(biz, list):
+            doors = biz
         if not isinstance(doors, list):
-            doors = biz.get("powerUserList")
-        if not isinstance(doors, list):
-            raise DataError("户号列表缺失")
+            self.log.warning("户号列表解析失败，回包结构（脱敏）：%s", shape(plain))
+            raise DataError("户号列表缺失（回包结构：" + shape(plain)[:400] + "）")
         result = []
         for door in doors:
             if not isinstance(door, dict):
