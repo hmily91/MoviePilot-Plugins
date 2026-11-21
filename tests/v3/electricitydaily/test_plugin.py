@@ -258,6 +258,90 @@ class PluginTest(unittest.TestCase):
         self.assertIn("powerUserList", text)
         self.assertIn("consNo", text)
 
+    def test_srvrt_result_code_rejected_when_top_code_ok(self) -> None:
+        """这次的真实故障：顶层 code 成功、srvrt.resultCode 失败，必须拦截。"""
+        from electricitydaily.client import business_error
+
+        plain = {"code": 1, "message": "成功", "data": {"srvrt": {
+            "timeStamp": "1763700000000", "resultCode": "0100",
+            "resultMessage": "该账号未绑定用电户号",
+        }}}
+        err = business_error(plain)
+        self.assertIn("resultCode=0100", err)
+        self.assertIn("invalid_auth", err)
+        # 服务层成功码则放行
+        ok = {"code": 1, "message": "成功", "data": {
+            "srvrt": {"resultCode": "0000", "resultMessage": "成功"}, "bizrt": {},
+        }}
+        self.assertEqual(business_error(ok), "")
+
+    def test_shape_keeps_diagnostic_codes_but_masks_digits(self) -> None:
+        """诊断字段留明文便于定位，但其中的户号/手机号必须打码。"""
+        from electricitydaily.client import shape
+
+        plain = {"code": 1, "message": "成功", "data": {"srvrt": {
+            "resultCode": "0100", "resultMessage": "户号4206668917676无权限",
+        }}}
+        text = shape(plain)
+        self.assertIn("resultCode='0100'", text)
+        self.assertNotIn("4206668917676", text)
+        self.assertIn("*" * 13, text)
+
+    def _make_client(self) -> StateGridClient:
+        return StateGridClient(
+            account="13800000000",
+            password_digest=hashlib.md5(b"pw").hexdigest(),
+            data_getter=lambda key: None,
+            data_setter=lambda key, value: None,
+            logger=mock.MagicMock(),
+        )
+
+    def test_doors_payload_includes_qu_info_user_id(self) -> None:
+        client = self._make_client()
+        client.user_info = {"userId": "uid-123"}
+        captured: dict[str, Any] = {}
+
+        def fake_call(api: str, payload: dict[str, Any]) -> dict[str, Any]:
+            captured["payload"] = payload
+            return {"code": "1", "data": {"bizrt": {"powerUserList": [
+                {"consNo_dst": "4206668917676", "elecTypeCode": "01"},
+            ]}}}
+
+        client.call = fake_call  # type: ignore[method-assign]
+        doors = client.fetch_doors()
+        self.assertEqual(len(doors), 1)
+        self.assertEqual(captured["payload"]["quInfo"], {"userId": "uid-123"})
+        client.close()
+
+    def test_doors_fallback_from_login_userinfo(self) -> None:
+        """c9/f02 只回 srvrt 时，从登录 userInfo.powerUserList 兜底取户号。"""
+        client = self._make_client()
+        client.user_info = {"userId": "uid-123", "powerUserList": [
+            {"consNo_dst": "4206668917676", "elecTypeCode": "01"},
+        ]}
+        # 服务层成功但没有 bizrt —— 正是这次的回包形态
+        client.call = lambda api, payload: {"code": 1, "data": {"srvrt": {  # type: ignore[method-assign]
+            "resultCode": "0000", "resultMessage": "成功",
+        }}}
+        doors = client.fetch_doors()
+        self.assertEqual(len(doors), 1)
+        self.assertEqual(doors[0]["consNo_dst"], "4206668917676")
+        client.close()
+
+    def test_daily_payload_includes_qu_info_user_id(self) -> None:
+        client = self._make_client()
+        client.user_info = {"userId": "uid-456"}
+        captured: dict[str, Any] = {}
+
+        def fake_call(api: str, payload: dict[str, Any]) -> dict[str, Any]:
+            captured["payload"] = payload
+            return {}
+
+        client.call = fake_call  # type: ignore[method-assign]
+        client.fetch_daily({"consNo_dst": "4206668917676"}, "20261101", "20261119", 2026)
+        self.assertEqual(captured["payload"]["params1"]["quInfo"], {"userId": "uid-456"})
+        client.close()
+
     def test_secure_roundtrip(self) -> None:
         secret = hashlib.md5(b"pw").hexdigest()
         sealed = secure.seal(secret)

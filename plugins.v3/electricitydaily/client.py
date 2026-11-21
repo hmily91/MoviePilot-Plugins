@@ -100,19 +100,33 @@ def _payload(plain: Any) -> dict[str, Any]:
     return plain
 
 
-def shape(plain: Any, max_depth: int = 6) -> str:
-    """回包的脱敏结构：只保留字段名/类型/数组长度，绝不输出任何业务值。
+def _mask_digits(text: str) -> str:
+    """把 6 位以上连续数字（户号/手机号/金额）打码，避免诊断信息泄漏隐私。"""
+    import re
 
-    用于在解析失败时定位真实回包形态，同时避免把户号、姓名、地址等隐私
-    写进日志和通知。
+    return re.sub(r"\d{6,}", lambda m: "*" * len(m.group()), str(text))
+
+
+# 这些字段是服务端状态码/提示，本身不是隐私，诊断时保留真实值最有价值。
+# resultMessage 仍会经过 _mask_digits 打码，避免其中夹带户号或手机号。
+DIAG_FIELDS = {"code", "message", "resultCode", "resultMessage", "errmsg"}
+
+
+def shape(plain: Any, max_depth: int = 6) -> str:
+    """回包脱敏结构：默认只留字段名/类型/数组长度；诊断字段留明文（已打码）。
+
+    这样既能定位真实回包形态，又不会把户号、姓名、地址等隐私写进日志和通知。
     """
-    def walk(node: Any, depth: int) -> str:
+    def walk(node: Any, depth: int, key: str = "") -> str:
         if depth > max_depth:
             return "..."
         if isinstance(node, dict):
             parts = []
-            for key in list(node.keys())[:24]:
-                parts.append(f"{key}:{walk(node[key], depth + 1)}")
+            for k in list(node.keys())[:24]:
+                if k in DIAG_FIELDS and not isinstance(node[k], (dict, list)):
+                    parts.append(f"{k}={_mask_digits(node[k])[:60]!r}")
+                else:
+                    parts.append(f"{k}:{walk(node[k], depth + 1, k)}")
             return "{" + ", ".join(parts) + "}"
         if isinstance(node, list):
             inner = walk(node[0], depth + 1) if node else ""
@@ -128,22 +142,34 @@ def shape(plain: Any, max_depth: int = 6) -> str:
 
 
 def business_error(plain: dict[str, Any]) -> str:
-    """若回包业务码非成功，返回包含分类与服务端可读消息的简短说明；否则空串。"""
+    """若回包业务码非成功，返回包含分类与服务端可读消息的简短说明；否则空串。
+
+    国网的顶层 code 与 data.srvrt.resultCode 是两套独立状态码：顶层成功只代表
+    HTTP/网关层通过，服务层失败时 data 里只有 srvrt、没有 bizrt。两套都必须查，
+    否则服务层错误会被误判成"数据缺失"。
+    """
     if not isinstance(plain, dict):
         return ""
-    code = str(plain.get("code") or "")
-    if code in OK_CODES or not code:
-        return ""
     srv = _srvrt(plain)
-    text = str(srv.get("resultMessage") or plain.get("message") or "")
     result_code = str(srv.get("resultCode") or "")
-    reason = classify_error(code, plain)
-    bits = [f"code={code}", f"分类={reason}"]
-    if result_code:
+    text = str(srv.get("resultMessage") or plain.get("message") or "")
+    bits: list[str] = []
+
+    code = str(plain.get("code") or "")
+    if code and code not in OK_CODES:
+        bits.append(f"code={code}")
+    # 关键：只要 srvrt.resultCode 存在且非成功码，就是服务层报错
+    if result_code and result_code not in OK_CODES:
         bits.append(f"resultCode={result_code}")
-    # 服务端消息可能含账号/姓名，这里只截取并按长度限制，避免隐私与超长
+    if not bits:
+        return ""
+    # 优先用真正报错的那套码来分类：顶层成功但 srvrt 失败时要用 resultCode
+    err_code = result_code if (result_code and result_code not in OK_CODES) else code
+    reason = classify_error(err_code, plain)
+    bits.append(f"分类={reason}")
+    # 服务端消息可能含账号/姓名，先打码再截断
     if text:
-        bits.append("message=" + text[:40])
+        bits.append("message=" + _mask_digits(text)[:60])
     return "，".join(bits)
 
 
@@ -185,7 +211,7 @@ def classify_error(code: Any, plain: Optional[dict[str, Any]] = None) -> str:
         text = str(srv.get("resultMessage") or plain.get("message") or "")
         result_code = str(srv.get("resultCode") or "")
     code = str(code or "")
-    if code in ("11401", "RK001") or "RK001" in text:
+    if code in ("11401", "RK001") or result_code in ("11401", "RK001") or "RK001" in text:
         return "rate_limited"
     if code in ("RK007", "RK008", "RK1003"):
         return "captcha_required"
@@ -193,6 +219,8 @@ def classify_error(code: Any, plain: Optional[dict[str, Any]] = None) -> str:
         return "invalid_code"
     if result_code in ("0100", "0101") or "密码" in text or "账号" in text:
         return "invalid_auth"
+    if "频繁" in text or "次数" in text or "限流" in text:
+        return "rate_limited"
     if not plain:
         return "cannot_connect"
     return "unknown"
@@ -602,12 +630,15 @@ class StateGridClient:
         }
 
     def fetch_doors(self) -> list[dict[str, Any]]:
+        user_id = str(self.user_info.get("userId") or "")
         payload = {
             "serviceCode": "01010049",
             "source": MEMBER,
             "target": "-1",
             "channelCode": "09",
             "channelNo": "09",
+            # 关键：开源实现验证了 quInfo.userId 必传，缺它服务端只回 srvrt、不给 bizrt
+            "quInfo": {"userId": user_id},
             "uscInfo": self._usc_info(),
             "token": self.token,
         }
@@ -625,9 +656,21 @@ class StateGridClient:
                 break
         if doors is None and isinstance(biz, list):
             doors = biz
+        # 兜底：App 通道登录回包的 userInfo 里直接带 powerUserList，无需该接口
         if not isinstance(doors, list):
-            self.log.warning("户号列表解析失败，回包结构（脱敏）：%s", shape(plain))
-            raise DataError("户号列表缺失（回包结构：" + shape(plain)[:400] + "）")
+            cached = self.user_info.get("powerUserList")
+            if isinstance(cached, list):
+                doors = cached
+                self.log.info("户号列表接口未给数据，改用登录 userInfo 中的 %d 个户号", len(cached))
+        if not isinstance(doors, list):
+            srv = _srvrt(plain)
+            hint = (
+                "服务层成功但未返回业务数据（可能缺少 quInfo.userId 或该账号无绑定户号）"
+                if str(srv.get("resultCode") or "") in OK_CODES
+                else "服务层返回错误"
+            )
+            self.log.warning("户号列表解析失败（%s），回包结构：%s", hint, shape(plain))
+            raise DataError(f"户号列表缺失：{hint}（回包结构：{shape(plain)[:400]}）")
         result = []
         for door in doors:
             if not isinstance(door, dict):
@@ -701,6 +744,7 @@ class StateGridClient:
                 "serviceCode": "BCP_000026",
                 "source": MEMBER,
                 "target": "32101",
+                "quInfo": {"userId": str(self.user_info.get("userId") or "")},
                 "uscInfo": self._usc_info(),
                 "token": self.token,
             },
