@@ -386,6 +386,22 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(data.get("endTime"), "2026-11-20")
         client.close()
 
+    def test_parse_daily_skips_unbilled_today(self) -> None:
+        """服务端会把当天返回一行但 dayElePq 为空，不能取这条空记录。
+
+        实测：end=今天时服务端返回 41 行，最后一行 2026-11-21 无 dayElePq；
+        若取最新会拿到 total=None，日报显示"暂无数据"。应跳过空行取昨天。
+        """
+        rows = [
+            {"day": "20261119", "dayElePq": "4.10"},
+            {"day": "20261120", "dayElePq": "5.27", "thisPPq": "1.50"},
+            {"day": "20261121", "dayElePq": ""},  # 今天，未出账
+        ]
+        plain = {"code": "1", "data": {"sevenEleList": rows}}
+        du = models.parse_daily(plain, datetime.date(2026, 11, 21))
+        self.assertEqual(du.date, "2026-11-20")
+        self.assertEqual(du.total, 5.27)
+
     def test_parse_real_ladder_fields(self) -> None:
         """湖北 c04/f03 真实字段：oneLevelPq/firstBalPq/totalYearPq/levelFlag。"""
         plain = {"code": "1", "data": {"list": [{"electricParticulars": {

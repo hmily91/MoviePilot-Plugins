@@ -166,9 +166,15 @@ def parse_daily(plain: dict[str, Any], today: datetime.date | None = None) -> Da
             continue
         if day_date > today:
             continue
+        # 服务端会把"今天"也返回一行，但当天还没出账、dayElePq 为空。
+        # 若不过滤，排序取最新时会正好取到这条空记录，日报显示"暂无数据"。
+        # 跳过没有日用电量的行；真实 0 用电会解析成 0.0（不是 None），不受影响。
+        total = to_float(row.get("dayElePq") or row.get("dayPq"))
+        if total is None:
+            continue
         parsed.append((digits, DailyUsage(
             date=f"{digits[:4]}-{digits[4:6]}-{digits[6:]}",
-            total=to_float(row.get("dayElePq") or row.get("dayPq")),
+            total=total,
             peak=to_float(row.get("thisPPq") or row.get("peakPq")),
             flat=to_float(row.get("thisNPq") or row.get("flatPq") or row.get("thisFPq")),
             valley=to_float(row.get("thisVPq") or row.get("valleyPq")),

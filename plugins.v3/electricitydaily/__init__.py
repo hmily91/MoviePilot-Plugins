@@ -74,7 +74,7 @@ class ElectricityDaily(_PluginBase):
     plugin_name = "电费日报"
     plugin_desc = "每日自动登录网上国网，推送用电量、账户余额与阶梯电量剩余。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "hmily"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "electricitydaily_"
@@ -371,7 +371,9 @@ class ElectricityDaily(_PluginBase):
 
             today = datetime.date.today()
             start = (today - datetime.timedelta(days=40)).strftime("%Y%m%d")
-            end = today.strftime("%Y%m%d")
+            # 日用电量按"最近一个已出账日"取。今天的数据尚未出账，服务端会返回
+            # 一条 dayElePq 为空的记录，故查询截止到昨天，避免取到空值。
+            end = (today - datetime.timedelta(days=1)).strftime("%Y%m%d")
             year_month = f"{today.year}-{today.month:02d}"
             reports: list[Report] = []
 
