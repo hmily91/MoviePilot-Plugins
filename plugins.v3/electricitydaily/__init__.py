@@ -85,7 +85,7 @@ class ElectricityDaily(_PluginBase):
     plugin_name = "电费日报"
     plugin_desc = "每日自动登录网上国网，推送用电量、账户余额与阶梯电量剩余。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     plugin_author = "hmily"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "electricitydaily_"

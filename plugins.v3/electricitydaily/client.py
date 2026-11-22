@@ -255,6 +255,11 @@ class StateGridClient:
         self.access_token = ""
         self.bearer_deadline = 0.0
         self.expires_at = 0
+        # 明文户号缓存：登录回包的 powerUserList 有时只给密文 consNo（无
+        # consNo_dst），且国网每天登录次数有限、被限流后当天无法重登。
+        # 一旦某次成功拿到明文就缓存下来，后续密文时按 userId 回填，避免
+        # 把密文当户号去查业务接口（那样会静默拿到空数据、日报缺字段）。
+        self.doors_cache: list[dict[str, Any]] = []
         self.cooldown_until = 0.0
         self.locked_until = 0.0
         self.fail_streak = 0
@@ -284,6 +289,8 @@ class StateGridClient:
         self.access_token = str(data.get("accessToken") or "")
         self.bearer_deadline = float(data.get("bearerDeadline") or 0)
         self.expires_at = int(data.get("expiresAt") or 0)
+        cached = data.get("doorsCache")
+        self.doors_cache = [x for x in cached if isinstance(x, dict)] if isinstance(cached, list) else []
         self.cooldown_until = float(data.get("cooldownUntil") or 0)
         used = str(data.get("account") or "")
         if used and used not in (self.account, self.alt_account):
@@ -306,6 +313,7 @@ class StateGridClient:
             "expiresAt": self.expires_at,
             "account": self.account,
             "cooldownUntil": self.cooldown_until,
+            "doorsCache": self.doors_cache,
             "savedAt": int(time.time()),
         }
         try:
@@ -611,6 +619,61 @@ class StateGridClient:
         return plain
 
     # ---------- 四个业务接口 ----------
+    @staticmethod
+    def _is_plain_cons(cons_no: str) -> bool:
+        """国网户号是纯数字串；带冒号/字母的是加密串（osg-uc 密文），不能用于取数。"""
+        value = str(cons_no or "").strip()
+        return value.isdigit()
+
+    def _restore_plain_cons(self, doors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """用缓存的明文户号回填本次回包里只有密文 consNo 的户号。
+
+        登录回包有时只下发密文 consNo（无 consNo_dst）。密文用于业务接口
+        会静默拿到空数据。按 userId 优先、其次按位置顺序，把缓存明文补回。
+        """
+        plain_pool = [
+            c for c in self.doors_cache
+            if self._is_plain_cons(str(c.get("consNo_dst") or c.get("consNo") or ""))
+        ]
+        if not plain_pool:
+            return doors
+        by_user = {
+            str(c.get("userId") or ""): c for c in plain_pool if c.get("userId")
+        }
+        used: set[int] = set()
+        out: list[dict[str, Any]] = []
+        for door in doors:
+            if not isinstance(door, dict):
+                out.append(door)
+                continue
+            cur = str(door.get("consNo_dst") or door.get("consNo") or "")
+            if self._is_plain_cons(cur):
+                out.append(door)
+                continue
+            match = by_user.get(str(door.get("userId") or ""))
+            idx = None
+            if match is None:
+                for i, cached in enumerate(plain_pool):
+                    if i not in used:
+                        idx = i
+                        match = cached
+                        break
+            if match is None:
+                out.append(door)
+                continue
+            if idx is None:
+                idx = plain_pool.index(match)
+            used.add(idx)
+            fixed = dict(door)
+            plain = str(match.get("consNo_dst") or match.get("consNo") or "")
+            fixed["consNo_dst"] = plain
+            for field in ("proNo", "orgNo", "provinceId", "constType", "consSortCode"):
+                if not fixed.get(field) and match.get(field):
+                    fixed[field] = match[field]
+            self.log.info("户号 %s 为密文，已用缓存明文回填", str(cur)[:12])
+            out.append(fixed)
+        return out
+
     def _door_identity(self, door: dict[str, Any]) -> dict[str, str]:
         cons_no = str(door.get("consNo_dst") or door.get("consNo") or "")
         return {
@@ -642,7 +705,19 @@ class StateGridClient:
             "uscInfo": self._usc_info(),
             "token": self.token,
         }
-        plain = self.call(API_DOOR_LIST, payload)
+        try:
+            plain = self.call(API_DOOR_LIST, payload)
+        except (ApiError, LoginError) as exc:
+            # 当天登录被限流、或 bearer 续不上又无法重登时，退回缓存的明文户号，
+            # 总比用密文查空、日报显示"缺字段"强。
+            if self.doors_cache:
+                self.log.warning(
+                    "户号接口暂不可用（%s），改用缓存的 %d 个明文户号",
+                    exc.reason if isinstance(exc, LoginError) else type(exc).__name__,
+                    len(self.doors_cache),
+                )
+                return [dict(d) for d in self.doors_cache]
+            raise
         biz = _payload(plain)
         # 兼容不同省份/客户端版本：data.bizrt.powerUserList / bizrt.powerUserList /
         # 顶层 powerUserList，以及 decryption 后直接就是列表的情况。
@@ -671,6 +746,8 @@ class StateGridClient:
             )
             self.log.warning("户号列表解析失败（%s），回包结构：%s", hint, shape(plain))
             raise DataError(f"户号列表缺失：{hint}（回包结构：{shape(plain)[:400]}）")
+        # 登录回包可能只有密文 consNo；先用缓存明文回填，避免把密文当户号取数
+        doors = self._restore_plain_cons(doors)
         result = []
         for door in doors:
             if not isinstance(door, dict):
@@ -680,6 +757,14 @@ class StateGridClient:
                 continue
             if self._door_identity(door)["consNo"]:
                 result.append(door)
+        # 只要这次拿到了明文户号就更新缓存（供后续密文回包/限流日降级使用）
+        plains = [
+            d for d in result
+            if self._is_plain_cons(self._door_identity(d)["consNo"])
+        ]
+        if plains:
+            self.doors_cache = plains
+            self._save_session()
         return result
 
     def fetch_balance(self, door: dict[str, Any]) -> dict[str, Any]:

@@ -344,6 +344,42 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(doors[0]["consNo_dst"], "4206668917676")
         client.close()
 
+    def test_cipher_cons_restored_from_cache(self) -> None:
+        """登录回包只给密文 consNo 时，用缓存明文回填，避免密文查空。"""
+        client = self._make_client()
+        client.user_info = {"userId": "uid-123"}
+        client.doors_cache = [{
+            "userId": "uid-123", "consNo_dst": "4206668917676",
+            "proNo": "345", "orgNo": "4206", "elecTypeCode": "01",
+        }]
+        client.call = lambda api, payload: {"code": "1", "data": {"bizrt": {  # type: ignore[method-assign]
+            "powerUserList": [{
+                "userId": "uid-123",
+                "consNo": "99:24a9725a494e490f9bd5df7b31cbd75d:02:osg-uc:001",
+                "elecTypeCode": "01",
+            }],
+        }}}
+        doors = client.fetch_doors()
+        self.assertEqual(len(doors), 1)
+        self.assertEqual(doors[0]["consNo_dst"], "4206668917676")
+        self.assertEqual(client._door_identity(doors[0])["consNo"], "4206668917676")
+        client.close()
+
+    def test_doors_fallback_to_cache_when_rate_limited(self) -> None:
+        """限流/无法重登时，退回缓存明文户号，而不是让整轮失败。"""
+        client = self._make_client()
+        client.user_info = {"userId": "uid-123"}
+        client.doors_cache = [{"userId": "uid-123", "consNo_dst": "4206668917676"}]
+
+        def boom(api, payload):  # type: ignore[no-untyped-def]
+            raise LoginError("rate_limited")
+
+        client.call = boom  # type: ignore[method-assign]
+        doors = client.fetch_doors()
+        self.assertEqual(len(doors), 1)
+        self.assertEqual(doors[0]["consNo_dst"], "4206668917676")
+        client.close()
+
     def test_daily_payload_includes_qu_info_user_id(self) -> None:
         client = self._make_client()
         client.user_info = {"userId": "uid-456"}
