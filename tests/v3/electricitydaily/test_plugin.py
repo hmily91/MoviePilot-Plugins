@@ -163,23 +163,20 @@ class PluginTest(unittest.TestCase):
         plugin = self.make_plugin()
         plugin.init_plugin({"enabled": True, "username": "13800000000",
                             "password": "TopSecret!", "notify_on_error": True})
-        original = electricitydaily.StateGridClient
+        original = electricitydaily.AppChannel
 
-        class FailingClient:
+        class FailingApp:
             def __init__(self, **kwargs: Any) -> None:
                 self.kwargs = kwargs
 
             def login(self) -> None:
                 raise LoginError("invalid_auth")
 
-            def close(self) -> None:
-                pass
-
-        electricitydaily.StateGridClient = FailingClient  # type: ignore[assignment]
+        electricitydaily.AppChannel = FailingApp  # type: ignore[assignment]
         try:
             plugin.refresh()
         finally:
-            electricitydaily.StateGridClient = original  # type: ignore[assignment]
+            electricitydaily.AppChannel = original  # type: ignore[assignment]
         self.assertEqual(len(self.messages), 1)
         self.assertIn("invalid_auth", self.messages[0]["text"])
         self.assertNotIn("TopSecret!", str(self.messages))
@@ -189,17 +186,20 @@ class PluginTest(unittest.TestCase):
         plugin = self.make_plugin()
         plugin.init_plugin({"enabled": True, "username": "13800000000",
                             "password": "pw", "notify_on_error": True})
-        original = electricitydaily.StateGridClient
+        original_app = electricitydaily.AppChannel
+        original_web = electricitydaily.StateGridClient
 
-        class PartialClient:
+        class FakeAccount:
+            def as_door(self) -> dict[str, Any]:
+                return {"consNo_dst": "123456789", "consNo": "123456789",
+                        "proNo": "11102", "orgNo": "11102", "constType": "01"}
+
+        class PartialApp:
             def __init__(self, **kwargs: Any) -> None:
-                pass
+                self.accounts = [FakeAccount()]
 
             def login(self) -> None:
                 pass
-
-            def fetch_doors(self) -> list[dict[str, Any]]:
-                return [{"consNo_dst": "123456789"}]
 
             def fetch_daily(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
                 return daily_payload()
@@ -210,14 +210,23 @@ class PluginTest(unittest.TestCase):
             def fetch_ladder(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
                 return {}
 
+        class FailingWeb:
+            def __init__(self, **kwargs: Any) -> None:
+                pass
+
+            def login(self) -> None:
+                raise LoginError("rate_limited")
+
             def close(self) -> None:
                 pass
 
-        electricitydaily.StateGridClient = PartialClient  # type: ignore[assignment]
+        electricitydaily.AppChannel = PartialApp  # type: ignore[assignment]
+        electricitydaily.StateGridClient = FailingWeb  # type: ignore[assignment]
         try:
             plugin.refresh()
         finally:
-            electricitydaily.StateGridClient = original  # type: ignore[assignment]
+            electricitydaily.AppChannel = original_app  # type: ignore[assignment]
+            electricitydaily.StateGridClient = original_web  # type: ignore[assignment]
         self.assertEqual(len(self.messages), 1)
         self.assertIn("账户余额：暂无数据", self.messages[0]["text"])
         self.assertIn("**阶梯电量剩余**\n- 暂无数据", self.messages[0]["text"])
@@ -505,6 +514,106 @@ class PluginTest(unittest.TestCase):
         sealed = secure.seal(secret)
         self.assertNotEqual(sealed, secret)
         self.assertEqual(secure.unseal(sealed), secret)
+
+
+class AppChannelTest(unittest.TestCase):
+    """App 通道：模拟官方 App 登录取数，绕开网页通道的每日登录限流。"""
+
+    def test_sm4_sm2_envelope_roundtrip(self) -> None:
+        """App 国密信封自洽：SM4-ECB(hex) + SM2 封装会话密钥。"""
+        from electricitydaily import app_crypto
+
+        key = "a" * 32
+        cipher = app_crypto.sm4_encrypt_hex("hello国网", key)
+        self.assertEqual(app_crypto.sm4_decrypt_hex(cipher, key).decode(), "hello国网")
+        # 用客户端私钥对应的公钥封，再解，验证 SM2 算法本身
+        pub = app_crypto._derive_public(app_crypto.CLIENT_PRIVATE_KEY_HEX)
+        wrapped = app_crypto.sm2_wrap(key, pub)
+        self.assertEqual(app_crypto.sm2_unwrap(wrapped), key)
+
+    def test_aes_check_code_matches_cryptography(self) -> None:
+        """checkCode 的 AES-256 兜底必须与标准库结果一致。"""
+        from electricitydaily import app_crypto
+
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.primitives.padding import PKCS7
+        except ImportError:
+            self.skipTest("cryptography 未安装")
+        data = b"1380000000123456"
+        padder = PKCS7(128).padder()
+        padded = padder.update(data) + padder.finalize()
+        enc = Cipher(algorithms.AES(b"LNPO+ISJ+QeqNemFK+3OMUdexSn2i6pB"),
+                     modes.ECB()).encryptor()
+        ref = (enc.update(padded) + enc.finalize()).hex()
+        mine = app_crypto._aes_ecb_stdlib(data, b"LNPO+ISJ+QeqNemFK+3OMUdexSn2i6pB").hex()
+        self.assertEqual(mine, ref)
+
+    def test_device_token_is_stable_from_seed(self) -> None:
+        """同一设备种子生成稳定身份；不同种子得到不同设备。"""
+        from electricitydaily.turing.feature_profile import StableProfile
+        from electricitydaily.turing.device_token import generate_device_token
+
+        p1 = StableProfile(b"s" * 32)
+        p2 = StableProfile(b"s" * 32)
+        # 同种子 -> 同设备身份（model/uuid/serial 等稳定）
+        self.assertEqual(p1.identity().model, p2.identity().model)
+        self.assertEqual(p1.identity().profile_id, p2.identity().profile_id)
+        # 令牌本身含每次随机的 nonce 与 SM2 随机点，故不逐字节相同；但都带 v3: 前缀
+        t1 = generate_device_token(p1, timestamp_ms=1700000000000)
+        self.assertTrue(t1.token.startswith("v3:"))
+        self.assertEqual(t1.token_time, "1700000000")
+
+    def test_daily_payload_uses_plain_cons_and_iso_dates(self) -> None:
+        from electricitydaily.app_client import AppAccount, _daily_payload
+
+        a = AppAccount.from_api({"powerUserNo": "ENC", "powerUserNo_dst": "1234567890",
+                                 "proNo": "11102", "orgNo": "11102", "constType": "01"})
+        p = _daily_payload(a, datetime.date(2026, 11, 1), datetime.date(2026, 11, 23))
+        self.assertEqual(p["data"]["consNo"], "1234567890")
+        self.assertEqual(p["data"]["consNosrc"], "1234567890")
+        self.assertEqual(p["data"]["startTime"], "2026-11-01")
+        self.assertEqual(p["data"]["funcCode"], "ALIPAY_01")
+
+    def test_cons_type_mapping(self) -> None:
+        from electricitydaily.app_client import AppAccount
+
+        self.assertEqual(AppAccount.from_api({"constType": "01"}).cons_type, "01")
+        self.assertEqual(AppAccount.from_api({"constType": "04"}).cons_type, "02")
+        # 北京的 02 特殊
+        self.assertEqual(AppAccount.from_api({"constType": "02", "proNo": "11102"}).cons_type, "02")
+
+    def test_app_wrap_shapes_response_for_existing_parser(self) -> None:
+        """App 回包包装成 data.bizrt 后，现有 parse_daily 能直接解析。"""
+        from electricitydaily.app_client import AppChannel
+
+        ch = AppChannel.__new__(AppChannel)
+        app_plain = {"code": "1", "data": {"sevenEleList": [
+            {"day": "2026-11-18", "dayElePq": "12.34", "thisPPq": "3.1"},
+        ]}}
+        wrapped = ch._wrap(app_plain)
+        usage = models.parse_daily(wrapped, today=datetime.date(2026, 11, 24))
+        self.assertEqual(usage.date, "2026-11-18")
+        self.assertEqual(usage.total, 12.34)
+
+    def test_session_expiry_forces_relogin(self) -> None:
+        """令牌剩余不足一天时不应复用旧会话。"""
+        from electricitydaily.app_client import AppChannel
+
+        store: dict[str, Any] = {
+            "app_device": {"seed_b64": __import__("base64").b64encode(b"s" * 32).decode(),
+                           "boot_epoch_ms": 1700000000000},
+            "app_session": {"account": "13800000000", "token": "t" * 40,
+                            "user_id": "u1", "expires_at": __import__("time").time() + 3600,
+                            "accounts": []},
+        }
+        ch = AppChannel(
+            account="13800000000", password_digest="a" * 32,
+            data_getter=lambda k: store.get(k),
+            data_setter=lambda k, v: store.__setitem__(k, v),
+            logger=mock.MagicMock(),
+        )
+        self.assertFalse(ch._authenticated)  # 只剩 1 小时，强制重登
 
 
 if __name__ == "__main__":

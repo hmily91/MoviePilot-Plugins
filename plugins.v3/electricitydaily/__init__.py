@@ -71,8 +71,9 @@ from .client import (
     LoginError,
     StateGridClient,
 )
+from .app_client import AppChannel
 from .message import build_combined_text, build_error_text, build_title
-from .models import Report, build_report
+from .models import Report, build_report, parse_ladder
 from . import secure
 
 DEFAULT_CRON = "0 8 * * *"
@@ -83,9 +84,9 @@ class ElectricityDaily(_PluginBase):
     """国家电网电费日报插件入口。"""
 
     plugin_name = "电费日报"
-    plugin_desc = "每日自动登录网上国网，推送用电量、账户余额与阶梯电量剩余。"
+    plugin_desc = "每日模拟网上国网 App 登录取数，推送用电量、余额与阶梯电量剩余，避开网页限流。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.9"
+    plugin_version = "1.1.0"
     plugin_author = "hmily"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "electricitydaily_"
@@ -100,6 +101,7 @@ class ElectricityDaily(_PluginBase):
         self._alt_account = ""
         self._cons_no = ""
         self._notify_on_error = True
+        self._sms_code = ""
         self._digest = ""
         self._lock = threading.Lock()
         self._last_status = "尚未运行"
@@ -123,6 +125,11 @@ class ElectricityDaily(_PluginBase):
         self._alt_account = str(config.get("alt_account") or "").strip()
         self._cons_no = str(config.get("cons_no") or "").strip()
         self._notify_on_error = bool(config.get("notify_on_error", True))
+        # 新设备短信验证码：国网首次用合成设备登录时可能要求，填一次后自动清掉
+        self._sms_code = str(config.get("sms_code") or "").strip()
+        if self._sms_code:
+            config["sms_code"] = ""
+            self.update_config(config)
         self._digest = secure.read_password_digest(config)
         self._cron_error = ""
         if self._cron:
@@ -211,8 +218,8 @@ class ElectricityDaily(_PluginBase):
             "props": {
                 "type": "info",
                 "variant": "tonal",
-                "text": "密码只用于生成登录摘要，保存后明文立即从配置中清除。"
-                        "登录凭据请用 MoviePilot 已配置的通知渠道接收，插件不另建推送通道。",
+                "text": "插件模拟网上国网 App 登录，令牌约 15 天有效，避免网页通道频繁重登导致的每日限流。"
+                        "密码只用于生成登录摘要，保存后明文立即清除。",
             },
         }
         enabled = {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}
@@ -256,6 +263,15 @@ class ElectricityDaily(_PluginBase):
                 "clearable": True,
             },
         }
+        sms_code = {
+            "component": "VTextField",
+            "props": {
+                "model": "sms_code",
+                "label": "新设备验证码（选填，一次性）",
+                "hint": "若推送提示“新设备验证”，国网会发验证短信给你；把收到的 6 位验证码填这里保存一次即可",
+                "clearable": True,
+            },
+        }
         cron = {
             "component": "VTextField",
             "props": {
@@ -276,7 +292,7 @@ class ElectricityDaily(_PluginBase):
                     self._row(self._col(enabled, md=6), self._col(notify_on_error, md=6)),
                     self._row(self._col(username, md=6), self._col(password, md=6)),
                     self._row(self._col(alt_account, md=6), self._col(cons_no, md=6)),
-                    self._row(self._col(cron)),
+                    self._row(self._col(sms_code, md=6), self._col(cron, md=6)),
                     self._row(self._col(onlyonce)),
                 ],
             }],
@@ -286,6 +302,7 @@ class ElectricityDaily(_PluginBase):
                 "password": "",
                 "alt_account": "",
                 "cons_no": "",
+                "sms_code": "",
                 "cron": DEFAULT_CRON,
                 "notify_on_error": True,
                 "onlyonce": False,
@@ -356,29 +373,13 @@ class ElectricityDaily(_PluginBase):
         if not self._lock.acquire(blocking=False):
             logger.debug("电费日报：上一轮尚未结束，跳过本次触发")
             return
-        client: StateGridClient | None = None
+        web_client: StateGridClient | None = None
+        _app_ref: AppChannel | None = None
         try:
             if not self._username or not self._digest:
                 raise ConfigError("缺少账号或密码摘要，请在插件配置中重新输入账号密码")
             if self._cron_error:
                 raise ConfigError(self._cron_error)
-
-            client = StateGridClient(
-                account=self._username,
-                password_digest=self._digest,
-                data_getter=self.get_data,
-                data_setter=self.save_data,
-                logger=logger,
-                alt_account=self._alt_account,
-            )
-            client.login()
-
-            doors = client.fetch_doors()
-            if self._cons_no:
-                doors = [d for d in doors if str(d.get("consNo_dst") or d.get("consNo") or "") == self._cons_no]
-            if not doors:
-                raise DataError("没有可查询的户号（或户号过滤条件无匹配）")
-            logger.info("电费日报：开始抓取 %d 个户号", len(doors))
 
             today = datetime.date.today()
             start = (today - datetime.timedelta(days=40)).strftime("%Y%m%d")
@@ -386,15 +387,35 @@ class ElectricityDaily(_PluginBase):
             # 一条 dayElePq 为空的记录，故查询截止到昨天，避免取到空值。
             end = (today - datetime.timedelta(days=1)).strftime("%Y%m%d")
             year_month = f"{today.year}-{today.month:02d}"
-            reports: list[Report] = []
 
+            # ── 主通道：模拟 App 登录取数（令牌约 15 天，避开网页每日限流）──
+            app = AppChannel(
+                account=self._username,
+                password_digest=self._digest,
+                data_getter=self.get_data,
+                data_setter=self.save_data,
+                logger=logger,
+                sms_code=self._sms_code,
+            )
+            _app_ref = app
+            app.login()
+            doors = [a.as_door() for a in app.accounts]
+            if self._cons_no:
+                doors = [d for d in doors
+                         if str(d.get("consNo_dst") or d.get("consNo") or "") == self._cons_no]
+            if not doors:
+                raise DataError("没有可查询的户号（或户号过滤条件无匹配）")
+            logger.info("电费日报：App 通道就绪，开始抓取 %d 个户号", len(doors))
+
+            reports: list[Report] = []
+            need_web_ladder = False  # App 阶梯取不到时，标记需要网页兜底
             for door in doors:
                 cons_no = str(door.get("consNo_dst") or door.get("consNo") or "")
                 parts: dict[str, dict[str, Any]] = {}
                 for name, fetch in (
-                    ("daily", lambda d=door: client.fetch_daily(d, start, end, today.year)),
-                    ("balance", lambda d=door: client.fetch_balance(d)),
-                    ("ladder", lambda d=door: client.fetch_ladder(d, year_month)),
+                    ("daily", lambda d=door: app.fetch_daily(d, start, end, today.year)),
+                    ("balance", lambda d=door: app.fetch_balance(d)),
+                    ("ladder", lambda d=door: app.fetch_ladder(d, year_month)),
                 ):
                     try:
                         parts[name] = fetch()
@@ -405,6 +426,10 @@ class ElectricityDaily(_PluginBase):
                             cons_no[-4:] if cons_no else "未知", name,
                             exc.reason if isinstance(exc, LoginError) else type(exc).__name__,
                         )
+                # App 月度接口在部分地区不返回阶梯档位；此情形留给网页通道补
+                if not parse_ladder(parts.get("ladder") or {})[0]:
+                    need_web_ladder = True
+                    parts["_ladder_door"] = door
                 reports.append(build_report(
                     cons_no=cons_no,
                     daily_plain=parts.get("daily"),
@@ -412,6 +437,34 @@ class ElectricityDaily(_PluginBase):
                     ladder_plain=parts.get("ladder"),
                     today=today,
                 ))
+
+            # ── 网页兜底：只补 App 拿不到的阶梯（单独登录，取一次即止）──
+            if need_web_ladder:
+                try:
+                    web_client = StateGridClient(
+                        account=self._username,
+                        password_digest=self._digest,
+                        data_getter=self.get_data,
+                        data_setter=self.save_data,
+                        logger=logger,
+                        alt_account=self._alt_account,
+                    )
+                    web_client.login()
+                    for report, original in zip(reports, doors):
+                        if not report.tiers:
+                            try:
+                                plain = web_client.fetch_ladder(original, year_month)
+                                tiers, stage = parse_ladder(plain)
+                                if tiers:
+                                    report.tiers = tiers
+                                    report.stage = stage
+                                    report.missing = [m for m in report.missing if m != "阶梯电量"]
+                            except (ApiError, LoginError) as exc:
+                                logger.warning("电费日报：网页通道补阶梯失败：%s",
+                                               exc.reason if isinstance(exc, LoginError) else type(exc).__name__)
+                except (LoginError, ApiError) as exc:
+                    logger.warning("电费日报：网页兜底通道不可用，阶梯按缺数处理：%s",
+                                   exc.reason if isinstance(exc, LoginError) else type(exc).__name__)
 
             if not reports:
                 raise DataError("未生成任何报告")
@@ -425,7 +478,11 @@ class ElectricityDaily(_PluginBase):
         except ConfigError as exc:
             self._handle_failure(exc, "配置错误")
         except LoginError as exc:
-            self._handle_failure(exc, "登录失败")
+            if exc.reason == "new_device":
+                # 服务端要求新设备验证：自动申请短信并提醒用户填一次性验证码
+                self._handle_new_device(app_ref=_app_ref)
+            else:
+                self._handle_failure(exc, "登录失败")
         except ApiError as exc:
             self._handle_failure(exc, "接口异常")
         except DataError as exc:
@@ -434,9 +491,28 @@ class ElectricityDaily(_PluginBase):
             logger.exception("电费日报：未预期异常：%s", type(exc).__name__)
             self._handle_failure(exc, "未预期异常", notify=False)
         finally:
-            if client is not None:
-                client.close()
+            if web_client is not None:
+                web_client.close()
             self._lock.release()
+
+    def _handle_new_device(self, app_ref: "AppChannel | None") -> None:
+        """国网要求新设备验证：申请短信并推送指引，用户填一次性验证码后即可。"""
+        code_key = ""
+        if app_ref is not None:
+            try:
+                code_key = app_ref.request_device_sms()
+                if code_key:
+                    app_ref.save_code_key(code_key)
+            except Exception as exc:
+                logger.warning("电费日报：申请新设备短信失败：%s", type(exc).__name__)
+        self._remember("新设备验证：已申请短信，请在配置填入验证码后保存")
+        tip = (
+            "国网要求对新设备做一次安全验证。已向你申请验证短信，"
+            "请把收到的 6 位验证码填入插件配置的“新设备验证码”，保存并再次运行即可。"
+            "这是首次绑定设备的一次性步骤，之后约 15 天内无需再验证。"
+        )
+        self._send("电费日报 | 需要新设备验证", tip)
+        logger.info("电费日报：已推送新设备验证指引（codeKey 长度 %d）", len(code_key))
 
     def _handle_failure(self, error: BaseException, category: str, notify: bool | None = None) -> None:
         if isinstance(error, LoginError):
