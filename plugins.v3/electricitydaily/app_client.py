@@ -490,11 +490,9 @@ class AppChannel:
         return self._wrap(plain)
 
     def fetch_ladder(self, door: dict[str, Any], year_month: str) -> dict[str, Any]:
-        """App 通道的阶梯数据来自月度账单接口 c51/f04（含 levelStdCode 等档位字段）。"""
-        a = AppAccount.from_api(door)
-        try:
-            year = int(year_month.split("-")[0])
-        except (ValueError, IndexError):
-            year = date.today().year
-        plain = self._authed(MONTHLY_PATH, _monthly_payload(a, year))
-        return self._wrap(plain)
+        """App 网关没有阶梯档位接口——实测 c04/f03、c05/f01、c21/f01 均 404，
+        c51/f04 月度账单里的 levelStdCode/secondRefPq 恒为 0，不含档位电量。
+        返回空让上层明确走网页兜底，避免月账单被误判成"第0档、额度0"的假阶梯。
+        """
+        self.log.info("App 通道不提供阶梯档位，交由网页通道补齐")
+        return {}

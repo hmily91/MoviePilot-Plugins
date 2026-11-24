@@ -616,5 +616,100 @@ class AppChannelTest(unittest.TestCase):
         self.assertFalse(ch._authenticated)  # 只剩 1 小时，强制重登
 
 
+class LadderParseTest(unittest.TestCase):
+    """阶梯解析必须拦截月账单假数据，只认真实档位电量。"""
+
+    def test_app_monthly_bill_rejected(self) -> None:
+        # App c51/f04 月账单：levelStdCode/secondRefPq 恒为 0，不是阶梯
+        from electricitydaily.models import parse_ladder
+
+        plain = {"code": "1", "data": {"bizrt": {"yearPq": "708", "list": [
+            {"levelStdCode": "0", "secondRefPq": "0", "monthPq": "67", "ym": "202610"},
+        ]}}}
+        tiers, stage = parse_ladder(plain)
+        self.assertEqual(tiers, [])
+        self.assertIsNone(stage)
+
+    def test_empty_ladder_fields_rejected(self) -> None:
+        # 湖北账号实测 c04/f03：档位字段全空，仅 totalPq 有值（月电量，非阶梯）
+        from electricitydaily.models import parse_ladder
+
+        plain = {"code": 1, "data": {"list": [{"electricParticulars": {
+            "oneLevelPq": "", "twoLevelPq": "0", "totalYearPq": "",
+            "totalPq": "67", "levelFlag": "0",
+        }}]}}
+        tiers, stage = parse_ladder(plain)
+        self.assertEqual(tiers, [])
+        self.assertIsNone(stage)
+
+    def test_real_ladder_parsed(self) -> None:
+        from electricitydaily.models import parse_ladder
+
+        plain = {"code": 1, "data": {"list": [{"electricParticulars": {
+            "oneLevelPq": "2160", "twoLevelPq": "2880",
+            "firstBalPq": "1452", "secondBalPq": "2880",
+            "totalYearPq": "708", "levelFlag": "1",
+        }}]}}
+        tiers, stage = parse_ladder(plain)
+        self.assertTrue(tiers)
+        self.assertEqual(tiers[0].quota, 2160.0)
+        self.assertEqual(tiers[0].remaining, 1452.0)
+        self.assertEqual(stage, 1)
+
+    def test_app_client_ladder_returns_empty(self) -> None:
+        # App 通道明确不提供阶梯，返回空驱动网页兜底
+        from electricitydaily.app_client import AppChannel
+
+        ch = AppChannel.__new__(AppChannel)
+        ch.log = mock.MagicMock()
+        self.assertEqual(ch.fetch_ladder({}, "2026-11"), {})
+
+
+class LadderCacheTest(unittest.TestCase):
+    """阶梯缓存：命中直接用、过期/换月失效、保存可复原。"""
+
+    def make_plugin(self) -> Any:
+        p = electricitydaily.ElectricityDaily()
+        p.update_config = lambda c, plugin_id=None: True  # type: ignore[method-assign]
+        p.save_data = lambda k, v, plugin_id=None: None  # type: ignore[method-assign]
+        p.get_data = lambda k=None, plugin_id=None: None  # type: ignore[method-assign]
+        p.post_message = lambda **kw: None  # type: ignore[method-assign]
+        return p
+
+    def test_cache_roundtrip(self) -> None:
+        from electricitydaily.models import Tier
+
+        p = self.make_plugin()
+        store: dict[str, Any] = {}
+        p.get_data = lambda k=None, plugin_id=None: store.get(k)  # type: ignore[method-assign]
+        p.save_data = lambda k, v, plugin_id=None: store.__setitem__(k, v)  # type: ignore[method-assign]
+        p._save_ladder_cache("2026-11", {"123": ([Tier(1, 2160, 708, 1452)], 1)})
+        got = p._cached_ladder("123", "2026-11", p._load_ladder_cache())
+        self.assertIsNotNone(got)
+        self.assertEqual(got[0][0].remaining, 1452.0)
+        self.assertEqual(got[1], 1)
+
+    def test_cache_month_mismatch_invalid(self) -> None:
+        from electricitydaily.models import Tier
+
+        p = self.make_plugin()
+        store: dict[str, Any] = {}
+        p.get_data = lambda k=None, plugin_id=None: store.get(k)  # type: ignore[method-assign]
+        p.save_data = lambda k, v, plugin_id=None: store.__setitem__(k, v)  # type: ignore[method-assign]
+        p._save_ladder_cache("2026-10", {"123": ([Tier(1, 2160, 708, 1452)], 1)})
+        self.assertIsNone(p._cached_ladder("123", "2026-11", p._load_ladder_cache()))
+
+    def test_cache_expired_invalid(self) -> None:
+        from electricitydaily.models import Tier
+
+        p = self.make_plugin()
+        store: dict[str, Any] = {}
+        p.get_data = lambda k=None, plugin_id=None: store.get(k)  # type: ignore[method-assign]
+        p.save_data = lambda k, v, plugin_id=None: store.__setitem__(k, v)  # type: ignore[method-assign]
+        p._save_ladder_cache("2026-11", {"123": ([Tier(1, 2160, 708, 1452)], 1)})
+        store["ladder_cache"]["saved_at"] -= 8 * 86400
+        self.assertIsNone(p._cached_ladder("123", "2026-11", p._load_ladder_cache()))
+
+
 if __name__ == "__main__":
     unittest.main()

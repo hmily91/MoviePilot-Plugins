@@ -233,12 +233,48 @@ def _first_float(node: dict[str, Any], names: Iterable[str]) -> float | None:
     return None
 
 
+# 只有这些字段带"实质数值"才算真实阶梯数据。levelStdCode/secondRefPq 这类
+# 状态位在被月账单误当成阶梯时恒为 0，不能作为可信信号；必须用档位额度、
+# 已用、剩余或年度累计中的至少一个正数来判定。
+_LADDER_VALUE_KEYS = (
+    "levlOnePq", "levelOnePq", "firstRefPq", "levl1Pq", "oneLevelPq",
+    "levlTwoPq", "levelTwoPq", "secondRefPq", "levl2Pq", "twoLevelPq",
+    "levlThrePq", "levelThreePq", "thirdRefPq", "levl3Pq", "threeLevelPq",
+    "levlOnePqSum", "levlTwoPqSum", "levlThrePqSum",
+    "levlOnePqRemain", "levlTwoPqRemain", "levlThrePqRemain",
+    "firstBalPq", "secondBalPq", "thirdBalPq",
+    "step1Quota", "step2Quota", "step3Quota",
+    "step1Used", "step2Used", "step3Used",
+    "step1Remain", "step2Remain", "step3Remain",
+    "tier1Quota", "tier2Quota", "tier3Quota",
+    # 注意：totalPq（月总电量）/totalYearPq/acuPq 不作为可信信号——月账单里
+    # totalPq 恒为正值但根本没有阶梯档位，曾因此误判出"第2档额度0"的假数据。
+)
+
+
+def _has_real_ladder_value(node: dict[str, Any]) -> bool:
+    """节点里是否存在任何 >0 的档位电量值；全 0/空视为无效（多为月账单误判）。"""
+    for key in _LADDER_VALUE_KEYS:
+        value = to_float(node.get(key))
+        if value is not None and value > 0:
+            return True
+    return False
+
+
 def parse_ladder(plain: dict[str, Any]) -> tuple[list[Tier], int | None]:
-    """从 c04/f03 解析各档额度/已用/剩余，并给出当前档位。"""
+    """从 c04/f03 解析各档额度/已用/剩余，并给出当前档位。
+
+    月账单（App 通道 c51/f04 或网页 c04/f03 的 electricParticulars）里也有
+    levelStdCode/secondRefPq 等键，但其档位值恒为 0/空。若不加校验会被误判成
+    "第0档、额度0"的假阶梯，进而跳过网页兜底。这里要求至少有一个档位电量为正。
+    """
     candidates = find_dicts(plain, _TIER_KEYS)
     if not candidates:
         return [], None
-    node = candidates[0]
+    # 优先挑含实质档位值的节点；否则一律判为无效。
+    node = next((c for c in candidates if _has_real_ladder_value(c)), None)
+    if node is None:
+        return [], None
     tiers: list[Tier] = []
     alias = {
         1: (

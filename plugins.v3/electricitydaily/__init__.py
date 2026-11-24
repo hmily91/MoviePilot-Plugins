@@ -73,7 +73,7 @@ from .client import (
 )
 from .app_client import AppChannel
 from .message import build_combined_text, build_error_text, build_title
-from .models import Report, build_report, parse_ladder
+from .models import Report, Tier, build_report, parse_ladder
 from . import secure
 
 DEFAULT_CRON = "0 8 * * *"
@@ -86,7 +86,7 @@ class ElectricityDaily(_PluginBase):
     plugin_name = "电费日报"
     plugin_desc = "每日模拟网上国网 App 登录取数，推送用电量、余额与阶梯电量剩余，避开网页限流。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "hmily"
     author_url = "https://github.com/hmily91/MoviePilot-Plugins"
     plugin_config_prefix = "electricitydaily_"
@@ -353,6 +353,56 @@ class ElectricityDaily(_PluginBase):
         except Exception as exc:
             logger.error("电费日报：调用 MoviePilot 推送失败：%s", type(exc).__name__)
 
+    # ── 阶梯缓存：阶梯是年度累计、按月出账，变化很慢，取到后复用数天，避免天天碰网页登录 ──
+    _LADDER_CACHE_KEY = "ladder_cache"
+    _LADDER_TTL_S = 7 * 86400  # 7 天
+
+    def _load_ladder_cache(self) -> dict[str, Any]:
+        try:
+            data = self.get_data(self._LADDER_CACHE_KEY) or {}
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _cached_ladder(self, cons_no: str, year_month: str,
+                       cache: dict[str, Any]) -> tuple[list[Tier], int | None] | None:
+        """缓存有效（未过期、同月份、有该户号）则返回阶梯，否则 None。"""
+        import time as _time
+        saved = float(cache.get("saved_at") or 0)
+        if not saved or _time.time() - saved > self._LADDER_TTL_S:
+            return None
+        if str(cache.get("month") or "") != year_month:
+            return None
+        item = (cache.get("items") or {}).get(cons_no)
+        if not isinstance(item, dict):
+            return None
+        tiers = [
+            Tier(index=int(t.get("index") or 0),
+                 quota=t.get("quota"), used=t.get("used"), remaining=t.get("remaining"))
+            for t in (item.get("tiers") or []) if isinstance(t, dict)
+        ]
+        if not tiers:
+            return None
+        return tiers, item.get("stage")
+
+    @staticmethod
+    def _tiers_to_dict(tiers: list[Tier]) -> list[dict[str, Any]]:
+        return [
+            {"index": t.index, "quota": t.quota, "used": t.used, "remaining": t.remaining}
+            for t in tiers
+        ]
+
+    def _save_ladder_cache(self, year_month: str, filled: dict[str, tuple[list[Tier], int | None]]) -> None:
+        import time as _time
+        cache = self._load_ladder_cache()
+        items = cache.get("items") if isinstance(cache.get("items"), dict) else {}
+        for cons_no, (tiers, stage) in filled.items():
+            items[cons_no] = {"tiers": self._tiers_to_dict(tiers), "stage": stage}
+        self.save_data(self._LADDER_CACHE_KEY, {
+            "items": items, "month": year_month, "saved_at": _time.time(),
+        })
+        logger.info("电费日报：阶梯结果已缓存 %d 个户号（%s）", len(filled), year_month)
+
     def _remember(self, status: str, reports: list[Report] | None = None) -> None:
         self._last_status = status
         snapshot: dict[str, Any] = {"status": status}
@@ -408,14 +458,15 @@ class ElectricityDaily(_PluginBase):
             logger.info("电费日报：App 通道就绪，开始抓取 %d 个户号", len(doors))
 
             reports: list[Report] = []
-            need_web_ladder = False  # App 阶梯取不到时，标记需要网页兜底
+            ladder_cache = self._load_ladder_cache()
+            ladder_filled: dict[str, tuple[list[Tier], int | None]] = {}
+            need_web_cons: list[tuple[Report, dict[str, Any]]] = []  # 缓存没命中、需网页补的户号
             for door in doors:
                 cons_no = str(door.get("consNo_dst") or door.get("consNo") or "")
                 parts: dict[str, dict[str, Any]] = {}
                 for name, fetch in (
                     ("daily", lambda d=door: app.fetch_daily(d, start, end, today.year)),
                     ("balance", lambda d=door: app.fetch_balance(d)),
-                    ("ladder", lambda d=door: app.fetch_ladder(d, year_month)),
                 ):
                     try:
                         parts[name] = fetch()
@@ -426,20 +477,26 @@ class ElectricityDaily(_PluginBase):
                             cons_no[-4:] if cons_no else "未知", name,
                             exc.reason if isinstance(exc, LoginError) else type(exc).__name__,
                         )
-                # App 月度接口在部分地区不返回阶梯档位；此情形留给网页通道补
-                if not parse_ladder(parts.get("ladder") or {})[0]:
-                    need_web_ladder = True
-                    parts["_ladder_door"] = door
-                reports.append(build_report(
+                report = build_report(
                     cons_no=cons_no,
                     daily_plain=parts.get("daily"),
                     balance_plain=parts.get("balance"),
-                    ladder_plain=parts.get("ladder"),
+                    ladder_plain=None,
                     today=today,
-                ))
+                )
+                # 1) 优先用缓存的阶梯（免登录、避开网页限流）
+                cached = self._cached_ladder(cons_no, year_month, ladder_cache)
+                if cached:
+                    report.tiers, report.stage = cached
+                    report.missing = [m for m in report.missing if m != "阶梯电量"]
+                    logger.info("电费日报：户号 %s 阶梯沿用缓存", cons_no[-4:])
+                else:
+                    need_web_cons.append((report, door))
+                reports.append(report)
 
-            # ── 网页兜底：只补 App 拿不到的阶梯（单独登录，取一次即止）──
-            if need_web_ladder:
+            # ── 网页兜底：只补缓存未命中的阶梯；取到即写缓存，数天内不再碰网页 ──
+            if need_web_cons:
+                web_client: StateGridClient | None = None
                 try:
                     web_client = StateGridClient(
                         account=self._username,
@@ -449,22 +506,31 @@ class ElectricityDaily(_PluginBase):
                         logger=logger,
                         alt_account=self._alt_account,
                     )
+                    # login() 内部会复用有效会话，仅会话失效时才重登；限流时不强行突破。
                     web_client.login()
-                    for report, original in zip(reports, doors):
-                        if not report.tiers:
-                            try:
-                                plain = web_client.fetch_ladder(original, year_month)
-                                tiers, stage = parse_ladder(plain)
-                                if tiers:
-                                    report.tiers = tiers
-                                    report.stage = stage
-                                    report.missing = [m for m in report.missing if m != "阶梯电量"]
-                            except (ApiError, LoginError) as exc:
-                                logger.warning("电费日报：网页通道补阶梯失败：%s",
-                                               exc.reason if isinstance(exc, LoginError) else type(exc).__name__)
+                    for report, original in need_web_cons:
+                        cons_no = str(original.get("consNo_dst") or original.get("consNo") or "")
+                        try:
+                            plain = web_client.fetch_ladder(original, year_month)
+                            tiers, stage = parse_ladder(plain)
+                            if tiers:
+                                report.tiers = tiers
+                                report.stage = stage
+                                report.missing = [m for m in report.missing if m != "阶梯电量"]
+                                ladder_filled[cons_no] = (tiers, stage)
+                                logger.info("电费日报：户号 %s 网页阶梯取到 %d 档", cons_no[-4:], len(tiers))
+                            else:
+                                logger.info("电费日报：户号 %s 网页阶梯无有效档位数据", cons_no[-4:])
+                        except (ApiError, LoginError) as exc:
+                            logger.warning("电费日报：网页通道补阶梯失败：%s",
+                                           exc.reason if isinstance(exc, LoginError) else type(exc).__name__)
                 except (LoginError, ApiError) as exc:
                     logger.warning("电费日报：网页兜底通道不可用，阶梯按缺数处理：%s",
                                    exc.reason if isinstance(exc, LoginError) else type(exc).__name__)
+                finally:
+                    if ladder_filled:
+                        self._save_ladder_cache(year_month, ladder_filled)
+                # web_client 由外层 finally 统一关闭
 
             if not reports:
                 raise DataError("未生成任何报告")
